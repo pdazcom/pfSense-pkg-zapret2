@@ -1,0 +1,68 @@
+#!/bin/sh
+#
+# PROVIDE: zapret2
+# REQUIRE: NETWORKING pf
+# KEYWORD: shutdown
+#
+# Add the following to /etc/rc.conf.local to enable zapret2 on boot:
+#   zapret2_enable="YES"
+#
+# This script delegates all logic to zapret2.inc (PHP CLI).
+# It only manages start/stop/restart/status/configtest.
+# It will ONLY kill processes whose PIDs are recorded in ZAPRET2_PID_FILE.
+#
+
+. /etc/rc.subr
+
+name="zapret2"
+rcvar="zapret2_enable"
+desc="Zapret2 DPI Bypass Service"
+
+ZAPRET2_PHP="/usr/local/bin/php"
+ZAPRET2_INC="/usr/local/pkg/zapret2/includes/zapret2.inc"
+ZAPRET2_LOG="/var/log/zapret2.log"
+
+start_cmd="zapret2_start"
+stop_cmd="zapret2_stop"
+restart_cmd="zapret2_restart"
+status_cmd="zapret2_status"
+extra_commands="configtest"
+configtest_cmd="zapret2_configtest"
+
+zapret2_start()
+{
+    if [ ! -f "${ZAPRET2_INC}" ]; then
+        echo "ERROR: zapret2.inc not found at ${ZAPRET2_INC}" >&2
+        exit 1
+    fi
+    echo "Starting ${name}..."
+    "${ZAPRET2_PHP}" "${ZAPRET2_INC}" start
+}
+
+zapret2_stop()
+{
+    echo "Stopping ${name}..."
+    "${ZAPRET2_PHP}" "${ZAPRET2_INC}" stop
+}
+
+zapret2_restart()
+{
+    echo "Restarting ${name}..."
+    "${ZAPRET2_PHP}" "${ZAPRET2_INC}" restart
+}
+
+zapret2_status()
+{
+    "${ZAPRET2_PHP}" "${ZAPRET2_INC}" status
+}
+
+zapret2_configtest()
+{
+    echo "Testing ${name} configuration..."
+    "${ZAPRET2_PHP}" "${ZAPRET2_INC}" configtest
+}
+
+load_rc_config "${name}"
+: "${zapret2_enable:=NO}"
+
+run_rc_command "$1"

@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<!--
+  config.xml.snippet — example showing how pfSense-pkg-zapret2
+  stores its settings within pfSense's main config.xml file.
+
+  This is for documentation and development reference only.
+  DO NOT manually edit config.xml on a live pfSense system unless you
+  know exactly what you are doing. Use the GUI instead.
+
+  Location on pfSense: /cf/conf/config.xml (or /conf/config.xml)
+
+  The actual config.xml is much larger; this snippet shows only the
+  relevant <installedpackages> section.
+-->
+
+<pfsense>
+  <!-- ... other pfSense config sections ... -->
+
+  <installedpackages>
+
+    <!--
+      Package metadata entry — added when the package is installed via
+      pfSense package manager or manually via zapret2_install().
+    -->
+    <package>
+      <name>zapret2</name>
+      <version>1.0.0</version>
+      <descr><![CDATA[Zapret2 DPI bypass — GUI management plugin]]></descr>
+      <pkginfolink>https://github.com/your-org/pfSense-pkg-zapret2</pkginfolink>
+      <include_file>/usr/local/pkg/zapret2/includes/zapret2.inc</include_file>
+    </package>
+
+    <!--
+      Plugin configuration — written by zapret2_save_config().
+      Accessed in PHP as:
+        $config['installedpackages']['zapret2']['config'][0]
+
+      Field descriptions:
+        enabled        — "on" or "" (empty string)
+        profile        — one of: safe | default | aggressive | custom
+        interfaces     — comma-separated pfSense interface names (e.g. lan,opt1)
+        targets        — comma-separated target keys: youtube,discord,rutacker,custom
+        custom_domains — newline-separated domain list (one per line)
+        custom_args    — raw nfqws arguments (only used when profile=custom)
+        debug          — "on" or "" — enables --debug flag on nfqws
+    -->
+    <zapret2>
+      <config>
+        <item>
+          <enabled>on</enabled>
+          <profile>default</profile>
+          <interfaces>lan,opt1</interfaces>
+          <targets>youtube,discord,rutacker</targets>
+          <custom_domains>blocked-example.com&#10;another-blocked.org</custom_domains>
+          <custom_args></custom_args>
+          <debug></debug>
+        </item>
+      </config>
+    </zapret2>
+
+  </installedpackages>
+
+  <!-- ... other pfSense config sections ... -->
+</pfsense>

@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE packagegui SYSTEM "../schema/packages.dtd">
+<?xml-stylesheet type="text/xsl" href="../xsl/package.xsl"?>
+<packagegui>
+  <copyright>
+    <![CDATA[
+    /*
+     * zapret2.xml — pfSense package manifest for Zapret2 DPI bypass
+     * Copyright (c) 2026 pfSense-pkg-zapret2 contributors
+     * All rights reserved.
+     */
+    ]]>
+  </copyright>
+
+  <name>zapret2</name>
+  <version>1.0.0</version>
+  <title>Zapret2 DPI Bypass</title>
+  <category>Services</category>
+  <license>BSD 2-Clause</license>
+
+  <description>
+    GUI management package for zapret2 — a DPI bypass tool for circumventing
+    deep packet inspection on FreeBSD/pfSense. Provides profile-based configuration,
+    service management, and a health check utility.
+
+    NOTE: This is an MVP/experimental release. The zapret2 backend (nfqws/tpws)
+    must be installed separately before using this package. See INSTALL.md.
+  </description>
+
+  <!--
+    Main PHP helper library.
+    Loaded by GUI page, rc.d script, and install/resync hooks.
+  -->
+  <include_file>/usr/local/pkg/zapret2/includes/zapret2.inc</include_file>
+
+  <!--
+    Register "Services → Zapret2" menu entry.
+  -->
+  <menu>
+    <name>Zapret2</name>
+    <tooltiptext>Configure Zapret2 DPI bypass</tooltiptext>
+    <section>Services</section>
+    <url>/zapret2/zapret2.php</url>
+  </menu>
+
+  <!--
+    Register zapret2 as a managed service.
+    pfSense uses this to show status in Services → Service Status.
+  -->
+  <service>
+    <name>zapret2</name>
+    <rcfile>zapret2</rcfile>
+    <executable>nfqws</executable>
+    <description>Zapret2 DPI Bypass Service</description>
+  </service>
+
+  <!--
+    Hook: called once when package is installed.
+    Creates directories, log file, and sets rc.d permissions.
+  -->
+  <custom_php_install_command>
+    <![CDATA[
+    zapret2_install();
+    ]]>
+  </custom_php_install_command>
+
+  <!--
+    Hook: called before package is removed.
+    Stops service and removes rc.conf.local entry.
+    Does NOT remove zapret2 backend binaries.
+  -->
+  <custom_php_pre_deinstall_command>
+    <![CDATA[
+    zapret2_deinstall();
+    ]]>
+  </custom_php_pre_deinstall_command>
+
+  <!--
+    Hook: called when pfSense config is written/synced (e.g. CARP sync).
+    Restarts service if enabled, stops if disabled.
+  -->
+  <custom_php_resync_config_command>
+    <![CDATA[
+    zapret2_resync();
+    ]]>
+  </custom_php_resync_config_command>
+
+  <!--
+    Hook: called during package validation (optional).
+    Returns true if configuration is valid.
+  -->
+  <custom_php_validation_command>
+    <![CDATA[
+    // Basic validation: profile must be a known value
+    $cfg = zapret2_get_config();
+    $valid_profiles = ['safe', 'default', 'aggressive', 'custom'];
+    if (!in_array($cfg['profile'] ?? 'default', $valid_profiles, true)) {
+        $input_errors[] = 'Invalid Zapret2 profile.';
+    }
+    ]]>
+  </custom_php_validation_command>
+</packagegui>

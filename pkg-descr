@@ -1,0 +1,19 @@
+pfSense GUI management plugin for Zapret2 DPI bypass.
+
+Zapret2 (nfqws/tpws) is an open-source tool for circumventing deep packet
+inspection (DPI) used by some ISPs to block or throttle specific services
+such as YouTube, Discord, and Rutracker.
+
+This package provides:
+  - GUI page under Services → Zapret2
+  - Profile-based configuration (safe / default / aggressive / custom)
+  - Interface selection (LAN and OPT interfaces)
+  - Per-target bypass control (YouTube, Discord, Rutracker, custom domains)
+  - Service management (start / stop / restart / health check)
+  - Status block with process info and recent log entries
+
+NOTE: This is an MVP/experimental release.
+The zapret2 backend (nfqws/tpws binaries) must be installed separately.
+See INSTALL.md in the package repository.
+
+WWW: https://github.com/your-org/pfSense-pkg-zapret2
