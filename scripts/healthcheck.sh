@@ -5,8 +5,8 @@
 # Checks:
 #   1. dvtws2 process running
 #   2. PID file matches running process
-#   3. IPFW divert rule is active
-#   4. Kernel modules loaded (ipfw, ipdivert)
+#   3. Kernel modules loaded (ipfw, ipdivert)
+#   4. IPFW rules active and consistent
 #
 # Exit codes:
 #   0 — all checks passed
@@ -47,6 +47,10 @@ check() {
     fi
 }
 
+ipfw_has_rule() {
+    ipfw list 2>/dev/null | grep -qE "^0*${1}[[:space:]]"
+}
+
 log "=== Zapret2 Health Check @ $(date) ==="
 
 # ---- 1. Process check ----
@@ -77,17 +81,81 @@ fi
 # ---- 3. Kernel modules ----
 log ""
 log "-- Kernel modules --"
-kldstat -n ipfw   >/dev/null 2>&1; check "ipfw module loaded"    $?
+kldstat -n ipfw     >/dev/null 2>&1; check "ipfw module loaded"    $?
 kldstat -n ipdivert >/dev/null 2>&1; check "ipdivert module loaded" $?
 
-# ---- 4. IPFW divert rule ----
+# ---- 4. IPFW rules ----
 log ""
-log "-- IPFW rule --"
-if ipfw list 2>/dev/null | grep -q "divert"; then
-    check "IPFW divert rule active" 0
+log "-- IPFW rules --"
+
+# Rule 100 is the first and only required rule
+
+# Rule 100 — main TCP divert (always required when service is running)
+if [ -n "$dvtws2_pids" ] && ipfw_has_rule 100; then
+    check "IPFW rule 100 (TCP 80/443 divert) active" 0
+elif [ -z "$dvtws2_pids" ] && ipfw_has_rule 100; then
+    check "IPFW rule 100 present but dvtws2 is NOT running — traffic is blackholed!" 1
+    log "  Fix: service zapret2 restart  OR  ipfw delete 100"
+elif [ -n "$dvtws2_pids" ] && ! ipfw_has_rule 100; then
+    check "IPFW rule 100 (TCP 80/443 divert) active" 1
+    log "  Hint: run 'ipfw list' to see current rules"
 else
-    check "IPFW divert rule active" 1
-    log "  Hint: run 'ipfw add 100 divert 990 tcp from any to any 80,443 out not diverted not sockarg'"
+    log "  [INFO] IPFW rule 100 not active (service stopped)"
+fi
+
+# Rule 101 — UDP 443 divert (QUIC — YouTube HTTP/3 or Discord)
+if ipfw_has_rule 101; then
+    rule101_detail=$(ipfw list 2>/dev/null | grep -E "^0*101[[:space:]]")
+    log "  [INFO] IPFW rule 101 (UDP 443 QUIC) active: ${rule101_detail}"
+else
+    log "  [INFO] IPFW rule 101 (UDP 443 QUIC) not active"
+fi
+
+# Rule 102 — UDP 50000-65535 divert (Discord voice/video)
+if ipfw_has_rule 102; then
+    log "  [INFO] IPFW rule 102 (UDP 50000-65535 Discord voice/video) active"
+else
+    log "  [INFO] IPFW rule 102 (UDP 50000-65535 Discord voice/video) not active"
+fi
+
+# IPFW table 1 — alias include mode
+TABLE1=$(ipfw table 1 list 2>/dev/null | wc -l | tr -d ' ')
+if [ "${TABLE1}" -gt 0 ]; then
+    log "  [INFO] IPFW table 1: ${TABLE1} entries (alias include mode active)"
+fi
+
+# ---- 5. Hostlists ----
+log ""
+log "-- Hostlists --"
+
+DISCORD_LIST="/usr/local/etc/zapret2/discord-hostlist.txt"
+YOUTUBE_LIST="/usr/local/etc/zapret2/youtube-hostlist.txt"
+
+if [ -f "$DISCORD_LIST" ]; then
+    dc=$(wc -l < "$DISCORD_LIST" | tr -d ' ')
+    log "  [INFO] Discord hostlist: ${dc} entries"
+else
+    log "  [INFO] Discord hostlist: not present (Discord bypass disabled)"
+fi
+
+if [ -f "$YOUTUBE_LIST" ]; then
+    yt=$(wc -l < "$YOUTUBE_LIST" | tr -d ' ')
+    log "  [INFO] YouTube hostlist: ${yt} entries"
+else
+    log "  [INFO] YouTube hostlist: not present (YouTube bypass disabled)"
+fi
+
+# ---- 6. dvtws2 command line (active args) ----
+log ""
+log "-- Active dvtws2 arguments --"
+if [ -n "$dvtws2_pids" ]; then
+    # ps on FreeBSD: -o args= prints full command line
+    ps_args=$(ps -p "$dvtws2_pids" -o args= 2>/dev/null | head -1)
+    if [ -n "$ps_args" ]; then
+        log "  ${ps_args}"
+    else
+        log "  (could not read process args)"
+    fi
 fi
 
 # ---- Summary ----

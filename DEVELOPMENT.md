@@ -12,13 +12,16 @@ pfSense-pkg-zapret2/
 │   └── zapret2.xml                             — pfSense package manifest
 ├── files/
 │   ├── usr/local/www/zapret2/
-│   │   └── zapret2.php                         — GUI page (Services → Zapret2)
+│   │   ├── zapret2.php                         — GUI page (Services → Zapret2)
+│   │   └── zapret2_test_runner.php             — async profile tester backend (CLI)
 │   ├── usr/local/pkg/zapret2/includes/
 │   │   └── zapret2.inc                         — config helpers, service control, install hooks
 │   ├── usr/local/etc/rc.d/
 │   │   └── zapret2                             — FreeBSD rc.d boot script
 │   └── usr/local/etc/zapret2/
-│       └── profiles.conf                       — dvtws2 Lua strategy profiles (examples)
+│       ├── profiles.conf                       — dvtws2 Lua strategy profiles (examples)
+│       ├── youtube-hostlist.txt                — generated on start when YouTube bypass enabled
+│       └── discord-hostlist.txt                — generated on start when Discord bypass enabled
 ├── scripts/
 │   ├── healthcheck.sh                          — health check (process, IPFW, modules)
 │   └── configtest.sh                           — config validation + dry-run
@@ -31,16 +34,25 @@ pfSense-pkg-zapret2/
 ```
 GUI (zapret2.php)
     ↓ POST: save / apply / start / stop / restart / healthcheck_ajax
+    ↓ POST: start_test_ajax / poll_test_ajax / stop_test_ajax  (profile tester)
 zapret2.inc  →  zapret2_save_config()  →  config.xml
              →  zapret2_resync()
-                    ↓ zapret2_load_kernel_modules()  →  kldload ipfw + ipdivert
-                    ↓ zapret2_set_ipfw_sysctls()     →  sysctl net.inet...
-                    ↓ zapret2_add_ipfw_rule()         →  pfctl -d;pfctl -e + ipfw add 100
+                    ↓ zapret2_load_kernel_modules()     →  kldload ipfw + ipdivert
+                    ↓ zapret2_set_ipfw_sysctls()        →  sysctl net.inet...
+                    ↓ zapret2_add_ipfw_rule()
+                            ipfw add 100 divert tcp 80,443      (always)
+                            ipfw add 101 divert udp 443         (YouTube QUIC or Discord UDP)
+                            ipfw add 102 divert udp 50000-65535 (Discord voice/video)
+                            ipfw table 1                        (alias include mode)
+                    ↓ zapret2_write_youtube_hostlist()  →  youtube-hostlist.txt
+                    ↓ zapret2_write_discord_hostlist()  →  discord-hostlist.txt
                     ↓ zapret2_build_command()
                             dvtws2 --daemon --port 990
                             --lua-init zapret-lib.lua
                             --lua-init zapret-antidpi.lua
                             --lua-desync <strategy from profile>
+                            --hostlist youtube-hostlist.txt   (if youtube_enabled)
+                            --hostlist discord-hostlist.txt   (if discord_enabled)
                     ↓ PID → /var/run/zapret2.pid
                     ↓ log → /var/log/zapret2.log
 ```
@@ -129,6 +141,10 @@ Profiles are defined in `zapret2_get_profile_args()` inside `zapret2.inc`. Each 
 | `multidisorder` | `--lua-desync=multidisorder:pos=1,midsld:seqovl=1` — Rostelecom, Beeline, MTS |
 | `fake_disorder` | `--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=11 --lua-desync=multidisorder:pos=1,midsld` |
 | `wssize` | `--lua-desync=wssize:wsize=1:scale=6 --lua-desync=multisplit:pos=midsld` |
+| `fake_aggressive` | `--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=15 --lua-desync=multidisorder:pos=1,midsld` |
+| `syndata` | `--lua-desync=syndata --lua-desync=multisplit:pos=host` |
+| `wssize_disorder` | `--lua-desync=wssize:wsize=1:scale=6 --lua-desync=multidisorder:pos=1,midsld:seqovl=1` |
+| `tls_clone` | `--lua-desync=tls_client_hello_clone --lua-desync=multisplit:pos=midsld` |
 | `custom` | raw `custom_args` from config verbatim |
 
 `profiles.conf` is a human-readable documentation file; the actual values are in `zapret2.inc`.

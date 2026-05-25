@@ -36,24 +36,29 @@
         $config['installedpackages']['zapret2']['config'][0]
 
       Field descriptions:
-        enabled        — "on" or "" (empty string)
-        profile        — one of: safe | default | aggressive | custom
-        interfaces     — comma-separated pfSense interface names (e.g. lan,opt1)
-        targets        — comma-separated target keys: youtube,discord,rutacker,custom
-        custom_domains — newline-separated domain list (one per line)
-        custom_args    — raw nfqws arguments (only used when profile=custom)
-        debug          — "on" or "" — enables --debug flag on nfqws
+        enabled              — "on" or "" (empty string)
+        profile              — one of: safe | default | multidisorder | fake_disorder | wssize | custom
+        divert_port          — integer 1-65535, default 990
+        custom_args          — raw dvtws2 arguments (only used when profile=custom)
+        debug                — "on" or "" — enables --debug flag on dvtws2
+        alias_name           — pfSense Firewall Alias name (host/network/urltable type);
+                               when set (and discord_enabled is off), IPFW rule 100 uses
+                               table(1) — only traffic to alias IPs goes through dvtws2
+        discord_enabled      — "on" or "" — adds --hostlist with Discord domains to dvtws2,
+                               overrides alias_name (rule 100 uses 'any')
+        discord_udp_enabled  — "on" or "" — adds IPFW rules 101-102 for Discord UDP voice/video
     -->
     <zapret2>
       <config>
         <item>
           <enabled>on</enabled>
           <profile>default</profile>
-          <interfaces>lan,opt1</interfaces>
-          <targets>youtube,discord,rutacker</targets>
-          <custom_domains>blocked-example.com&#10;another-blocked.org</custom_domains>
+          <divert_port>990</divert_port>
           <custom_args></custom_args>
           <debug></debug>
+          <alias_name></alias_name>
+          <discord_enabled></discord_enabled>
+          <discord_udp_enabled></discord_udp_enabled>
         </item>
       </config>
     </zapret2>
