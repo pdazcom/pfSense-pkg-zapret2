@@ -5,7 +5,8 @@
 - [B. Installation](#b-installation)
 - [C. Post-install: pfSense network configuration](#c-post-install-pfsense-network-configuration)
 - [D. Verifying the service](#d-verifying-the-service)
-- [E. Testing bypass from a LAN client](#e-testing-bypass-from-a-lan-client)
+- [E. Traffic Filtering Options](#e-traffic-filtering-options)
+- [F. Testing bypass from a LAN client](#f-testing-bypass-from-a-lan-client)
 
 ---
 
@@ -192,7 +193,33 @@ tail -f /var/log/zapret2.log
 
 ---
 
-## E. Testing bypass from a LAN client
+## E. Traffic Filtering Options
+
+### YouTube DPI Bypass
+
+Enable **YouTube DPI Bypass (TCP 443)** to restrict dvtws2 to YouTube and Google Video domains only (youtube.com, googlevideo.com, ytimg.com, youtu.be, and 20+ related domains). dvtws2 applies the selected profile strategy only to matching traffic.
+
+Optionally enable **YouTube QUIC / HTTP3 (UDP 443)** to also intercept UDP 443 — required when browsers use HTTP/3 instead of TCP.
+
+### Discord DPI Bypass
+
+Enable **Discord DPI Bypass (TCP 443)** to restrict dvtws2 to Discord domains (discord.com, discordapp.com, discord.gg, discord.media, etc.).
+
+Optionally enable **Discord Voice/Video (UDP)** to add IPFW rules for UDP 443 (QUIC) and UDP 50000–65535 (voice/video).
+
+### Alias Include Mode
+
+Select a pfSense **Firewall Alias** containing IPs or subnets to restrict dvtws2 to those destinations only. Everything else bypasses dvtws2 entirely. Hostname entries in the alias are skipped (ipfw tables require IPs/CIDRs).
+
+Alias mode is ignored when YouTube or Discord bypass is enabled — in those modes dvtws2 filters by domain name itself.
+
+### Combining modes
+
+YouTube and Discord hostlists can be active simultaneously — dvtws2 receives both `--hostlist=` arguments and processes traffic matching either list.
+
+---
+
+## F. Testing bypass from a LAN client
 
 > **Important:** Test from a LAN client (PC, phone), not from the pfSense shell itself. dvtws2 intercepts traffic routed through the router, not traffic originating from the router.
 

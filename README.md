@@ -13,14 +13,17 @@ On FreeBSD/pfSense, zapret2 uses `dvtws2` — a divert-socket based engine (not 
 - Adds a **Services → Zapret2** page to the pfSense web interface
 - Downloads and installs the zapret2 backend (`dvtws2` + Lua files) automatically via `make install`
 - Manages the service lifecycle (start/stop/restart) via FreeBSD rc.d
-- Loads required kernel modules (`ipfw`, `ipdivert`) and sets up IPFW divert rule on start
-- Shows service status, process PID, kernel module state, IPFW rule state, and recent log entries
-- Provides a built-in health check (process, PID file, kernel modules, IPFW rule)
+- Loads required kernel modules (`ipfw`, `ipdivert`) and sets up IPFW divert rules on start
+- **YouTube DPI bypass** — hostlist filter for YouTube and Google Video domains (youtube.com, googlevideo.com, ytimg.com, etc.); optional UDP 443 divert for QUIC/HTTP3
+- **Discord DPI bypass** — hostlist filter for Discord domains; optional UDP divert for voice/video (UDP 443 + 50000–65535)
+- **Alias include mode** — restrict processing to specific IP/CIDR firewall alias (ipfw table 1)
+- Shows service status, active IPFW rules, hostlist state, live dvtws2 arguments, and recent log entries
+- Built-in **Health Check** (process, PID file, kernel modules, IPFW rules, hostlists)
+- Built-in **Profile Tester** — tests each profile via HTTP/TLS or DPI checks and recommends the best one
 
 ## What It Does NOT Do
 
 - Does **not** guarantee bypass effectiveness — results depend on your ISP's DPI system
-- Does **not** filter by domain — dvtws2 processes all TCP traffic on ports 80/443
 - Does **not** modify pfSense firewall/NAT rules — uses IPFW divert which is separate from pf
 - Does **not** modify any existing pfSense configuration outside its own config section
 - Does **not** reboot the system automatically
@@ -89,11 +92,16 @@ pfSense-pkg-zapret2/
 GUI (zapret2.php) → save config → config.xml
                   → apply/start → zapret2.inc CLI
                                       ↓ kldload ipfw + ipdivert
-                                      ↓ ipfw add 100 divert 990 tcp ...
+                                      ↓ ipfw add 100 divert 990 tcp 80,443 ...
+                                      ↓ ipfw add 101 divert 990 udp 443 ...   (YouTube QUIC / Discord)
+                                      ↓ ipfw add 102 divert 990 udp 50000-65535 ... (Discord voice)
+                                      ↓ write youtube-hostlist.txt / discord-hostlist.txt
                                       ↓ dvtws2 --daemon --port 990
                                             --lua-init zapret-lib.lua
                                             --lua-init zapret-antidpi.lua
                                             --lua-desync <profile strategy>
+                                            --hostlist youtube-hostlist.txt   (if YouTube enabled)
+                                            --hostlist discord-hostlist.txt   (if Discord enabled)
 ```
 
 ## License
