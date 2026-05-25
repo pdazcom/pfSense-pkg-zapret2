@@ -65,4 +65,13 @@ zapret2_configtest()
 load_rc_config "${name}"
 : "${zapret2_enable:=NO}"
 
+# Allow one* commands regardless of zapret2_enable so that
+# 'service zapret2 onestop / onestart / onerestart' always work from the shell.
+case "$1" in
+    onestart)   zapret2_start;   exit $? ;;
+    onestop)    zapret2_stop;    exit $? ;;
+    onerestart) zapret2_restart; exit $? ;;
+    onestatus)  zapret2_status;  exit $? ;;
+esac
+
 run_rc_command "$1"

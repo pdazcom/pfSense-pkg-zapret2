@@ -3,6 +3,7 @@ PLUGIN_DIR != pwd
 # Deploy to a remote pfSense box.
 # Usage: make install HOST=root@10.0.0.1
 HOST ?=
+SSH_OPTS ?=
 
 ZAPRET2_VERSION ?= v0.9.5.2
 ZAPRET2_TARBALL = /tmp/zapret2-$(ZAPRET2_VERSION).tar.gz
@@ -36,16 +37,35 @@ uninstall:
 	fi
 
 # Push only plugin files (no backend re-download). Useful during development.
+# All files are staged into a temp tree, tarred, and sent in one SSH connection — one password prompt.
 update:
 	@if [ -z "$(HOST)" ]; then echo "Usage: make update HOST=root@<ip>"; exit 1; fi
 	@echo "=== Updating plugin files on $(HOST) ==="
-	scp files/usr/local/www/zapret2/zapret2.php        $(HOST):/usr/local/www/zapret2/zapret2.php
-	scp files/usr/local/pkg/zapret2/includes/zapret2.inc $(HOST):/usr/local/pkg/zapret2/includes/zapret2.inc
-	scp files/usr/local/etc/rc.d/zapret2               $(HOST):/usr/local/etc/rc.d/zapret2
-	scp files/usr/local/etc/zapret2/profiles.conf      $(HOST):/usr/local/etc/zapret2/profiles.conf
-	scp scripts/healthcheck.sh                          $(HOST):/usr/local/share/zapret2/healthcheck.sh
-	scp scripts/configtest.sh                           $(HOST):/usr/local/share/zapret2/configtest.sh
-	@echo "Done."
+	@STAGE=$$(mktemp -d /tmp/zapret2-update.XXXXXX); \
+	mkdir -p \
+		"$$STAGE/usr/local/www/zapret2" \
+		"$$STAGE/usr/local/pkg/zapret2/includes" \
+		"$$STAGE/usr/local/etc/rc.d" \
+		"$$STAGE/usr/local/etc/zapret2" \
+		"$$STAGE/usr/local/share/zapret2"; \
+	cp files/usr/local/www/zapret2/zapret2.php                    "$$STAGE/usr/local/www/zapret2/zapret2.php"; \
+	cp files/usr/local/www/zapret2/zapret2_test_runner.php        "$$STAGE/usr/local/www/zapret2/zapret2_test_runner.php"; \
+	cp files/usr/local/pkg/zapret2/includes/zapret2.inc  "$$STAGE/usr/local/pkg/zapret2/includes/zapret2.inc"; \
+	cp files/usr/local/etc/rc.d/zapret2                  "$$STAGE/usr/local/etc/rc.d/zapret2"; \
+	cp files/usr/local/etc/zapret2/profiles.conf         "$$STAGE/usr/local/etc/zapret2/profiles.conf"; \
+	cp scripts/healthcheck.sh                            "$$STAGE/usr/local/share/zapret2/healthcheck.sh"; \
+	cp scripts/configtest.sh                             "$$STAGE/usr/local/share/zapret2/configtest.sh"; \
+	tar --no-mac-metadata --no-xattrs -cf - -C "$$STAGE" usr 2>/dev/null \
+	| ssh $(SSH_OPTS) $(HOST) 'tar -xf - -C / && \
+		chmod 555  /usr/local/etc/rc.d/zapret2 && \
+		chmod 644  /usr/local/www/zapret2/zapret2.php \
+		           /usr/local/www/zapret2/zapret2_test_runner.php \
+		           /usr/local/pkg/zapret2/includes/zapret2.inc \
+		           /usr/local/etc/zapret2/profiles.conf && \
+		chmod 755  /usr/local/share/zapret2/healthcheck.sh \
+		           /usr/local/share/zapret2/configtest.sh && \
+		echo Done.'; \
+	rm -rf "$$STAGE"
 
 check:
 	@echo "=== PHP lint ==="

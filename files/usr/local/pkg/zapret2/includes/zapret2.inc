@@ -18,8 +18,10 @@ define('ZAPRET2_CONF_DIR',     '/usr/local/etc/zapret2');
 define('ZAPRET2_PROFILES_CONF','/usr/local/etc/zapret2/profiles.conf');
 define('ZAPRET2_LOG_FILE',     '/var/log/zapret2.log');
 define('ZAPRET2_PID_FILE',     '/var/run/zapret2.pid');
-define('ZAPRET2_DIVERT_PORT',  990);
-define('ZAPRET2_TAG',          'pfSense-pkg-zapret2');
+define('ZAPRET2_DIVERT_PORT',    990);
+define('ZAPRET2_TAG',            'pfSense-pkg-zapret2');
+define('ZAPRET2_DISCORD_HOSTLIST', '/usr/local/etc/zapret2/discord-hostlist.txt');
+define('ZAPRET2_YOUTUBE_HOSTLIST', '/usr/local/etc/zapret2/youtube-hostlist.txt');
 
 // ---------------------------------------------------------------------------
 // Config read/write
@@ -132,6 +134,34 @@ function zapret2_get_profile_args(string $profile, array $cfg = []): array
                 '--lua-desync=multisplit:pos=midsld',
             ];
 
+        case 'fake_aggressive':
+            // Aggressive fake TLS with high repeat count + multidisorder — for stubborn DPI
+            return [
+                '--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=15',
+                '--lua-desync=multidisorder:pos=1,midsld',
+            ];
+
+        case 'syndata':
+            // SYN packet with data — alternative when fragment-based methods are blocked
+            return [
+                '--lua-desync=syndata',
+                '--lua-desync=multisplit:pos=host',
+            ];
+
+        case 'wssize_disorder':
+            // Window size reduction combined with multidisorder — combo method
+            return [
+                '--lua-desync=wssize:wsize=1:scale=6',
+                '--lua-desync=multidisorder:pos=1,midsld:seqovl=1',
+            ];
+
+        case 'tls_clone':
+            // TLS Client Hello clone — mirrors the handshake to confuse stateful DPI
+            return [
+                '--lua-desync=tls_client_hello_clone',
+                '--lua-desync=multisplit:pos=midsld',
+            ];
+
         case 'custom':
             // User-supplied raw arguments — used verbatim (validated for printable chars only)
             $raw = zapret2_sanitize_args($cfg['custom_args'] ?? '');
@@ -140,6 +170,122 @@ function zapret2_get_profile_args(string $profile, array $cfg = []): array
         default:
             return [];
     }
+}
+
+// ---------------------------------------------------------------------------
+// Discord hostlist writer
+// ---------------------------------------------------------------------------
+
+function zapret2_write_discord_hostlist(): void
+{
+    $domains = [
+        'discord.com',
+        '*.discord.com',
+        'discordapp.com',
+        '*.discordapp.com',
+        'discord.gg',
+        'discord.media',
+        '*.discord.media',
+        'discordapp.net',
+        '*.discordapp.net',
+        'discordcdn.com',
+        '*.discordcdn.com',
+        'discord.new',
+        'discord.co',
+    ];
+    $result = file_put_contents(ZAPRET2_DISCORD_HOSTLIST, implode("\n", $domains) . "\n");
+    if ($result === false) {
+        zapret2_log('ERROR: failed to write discord hostlist to ' . ZAPRET2_DISCORD_HOSTLIST);
+        return;
+    }
+    chmod(ZAPRET2_DISCORD_HOSTLIST, 0644);
+}
+
+// ---------------------------------------------------------------------------
+// YouTube hostlist writer
+// ---------------------------------------------------------------------------
+
+function zapret2_write_youtube_hostlist(): void
+{
+    $domains = [
+        'youtube.com',
+        '*.youtube.com',
+        'youtu.be',
+        'youtube-nocookie.com',
+        '*.youtube-nocookie.com',
+        'youtube-ui.l.google.com',
+        'wide-youtube.l.google.com',
+        'youtubekids.com',
+        '*.youtubekids.com',
+        'youtubei.googleapis.com',
+        'youtubeembeddedplayer.googleapis.com',
+        'yt-video-upload.l.google.com',
+        'googlevideo.com',
+        '*.googlevideo.com',
+        'yt3.ggpht.com',
+        'yt4.ggpht.com',
+        'yt3.googleusercontent.com',
+        'ytimg.com',
+        '*.ytimg.com',
+        'ytimg.l.google.com',
+        'jnn-pa.googleapis.com',
+        'play.google.com',
+    ];
+    $result = file_put_contents(ZAPRET2_YOUTUBE_HOSTLIST, implode("\n", $domains) . "\n");
+    if ($result === false) {
+        zapret2_log('ERROR: failed to write youtube hostlist to ' . ZAPRET2_YOUTUBE_HOSTLIST);
+        return;
+    }
+    chmod(ZAPRET2_YOUTUBE_HOSTLIST, 0644);
+}
+
+// ---------------------------------------------------------------------------
+// Alias → ipfw table resolver
+// ---------------------------------------------------------------------------
+
+function zapret2_resolve_alias_to_table(): bool
+{
+    if (!function_exists('filter_expand_alias_array')) {
+        require_once('/etc/inc/filter.inc');
+    }
+
+    $cfg       = zapret2_get_config();
+    $aliasName = trim($cfg['alias_name'] ?? '');
+
+    if ($aliasName === '') {
+        return false;
+    }
+
+    mwexec('ipfw table 1 flush 2>/dev/null; true');
+
+    $entries = filter_expand_alias_array($aliasName);
+
+    if (empty($entries)) {
+        zapret2_log('WARNING: alias "' . $aliasName . '" empty or not found — falling back to "any"');
+        return false;
+    }
+
+    $added = 0;
+    foreach ($entries as $entry) {
+        $entry = trim($entry);
+        if (!preg_match('/^[0-9]{1,3}(\.[0-9]{1,3}){3}(\/[0-9]+)?$/', $entry)
+            && !preg_match('/^[0-9a-fA-F:]+\/[0-9]+$/', $entry)
+            && !preg_match('/^[0-9a-fA-F:]+$/', $entry)) {
+            zapret2_log('alias entry "' . $entry . '" is not IP/CIDR, skipping');
+            continue;
+        }
+        if (mwexec('ipfw table 1 add ' . escapeshellarg($entry) . ' 2>/dev/null') === 0) {
+            $added++;
+        }
+    }
+
+    if ($added === 0) {
+        zapret2_log('WARNING: alias "' . $aliasName . '" has no valid IP/CIDR entries — falling back to "any"');
+        return false;
+    }
+
+    zapret2_log('alias "' . $aliasName . '": ' . $added . ' entries loaded into ipfw table 1');
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +316,16 @@ function zapret2_build_command(): string
     // Append profile Lua desync arguments
     foreach ($args as $arg) {
         $parts[] = $arg;
+    }
+
+    // Discord hostlist filter
+    if (($cfg['discord_enabled'] ?? '') === 'on') {
+        $parts[] = '--hostlist=' . escapeshellarg(ZAPRET2_DISCORD_HOSTLIST);
+    }
+
+    // YouTube hostlist filter
+    if (($cfg['youtube_enabled'] ?? '') === 'on') {
+        $parts[] = '--hostlist=' . escapeshellarg(ZAPRET2_YOUTUBE_HOSTLIST);
     }
 
     // Debug logging
@@ -203,22 +359,66 @@ function zapret2_set_ipfw_sysctls(): void
     mwexec('sysctl net.inet6.ip6.pfil.inbound=ipfw,pf 2>/dev/null; true');
 }
 
+function zapret2_reset_ipfw_sysctls(): void
+{
+    mwexec('sysctl net.inet.ip.pfil.outbound=pf 2>/dev/null; true');
+    mwexec('sysctl net.inet.ip.pfil.inbound=pf 2>/dev/null; true');
+    mwexec('sysctl net.inet6.ip6.pfil.outbound=pf 2>/dev/null; true');
+    mwexec('sysctl net.inet6.ip6.pfil.inbound=pf 2>/dev/null; true');
+}
+
 function zapret2_add_ipfw_rule(): void
 {
-    $cfg        = zapret2_get_config();
-    $divertPort = zapret2_sanitize_port((int) ($cfg['divert_port'] ?? ZAPRET2_DIVERT_PORT));
+    $cfg           = zapret2_get_config();
+    $divertPort    = zapret2_sanitize_port((int) ($cfg['divert_port'] ?? ZAPRET2_DIVERT_PORT));
+    $aliasName     = trim($cfg['alias_name'] ?? '');
+    $discordOn     = ($cfg['discord_enabled'] ?? '') === 'on';
+    $discordUdpOn  = ($cfg['discord_udp_enabled'] ?? '') === 'on';
+    $youtubeOn     = ($cfg['youtube_enabled'] ?? '') === 'on';
+    $youtubeQuicOn = ($cfg['youtube_quic_enabled'] ?? '') === 'on';
 
     // Re-enable pf after ipfw load (required for pfSense 2.6.0+)
     mwexec('pfctl -d 2>/dev/null; pfctl -e 2>/dev/null; true');
 
-    // Remove any existing rule 100 and add the divert rule
     mwexec('ipfw delete 100 2>/dev/null; true');
-    mwexec('ipfw add 100 divert ' . $divertPort . ' tcp from any to any 80,443 out not diverted not sockarg');
+    mwexec('ipfw delete 101 2>/dev/null; true');
+    mwexec('ipfw delete 102 2>/dev/null; true');
+
+    // When any hostlist mode is on, use 'any' — dvtws2 filters by domain itself.
+    // When both are off, optionally restrict to alias table(1).
+    if ($discordOn || $youtubeOn) {
+        $tcpDst = 'any';
+    } elseif ($aliasName !== '' && zapret2_resolve_alias_to_table()) {
+        $tcpDst = "'table(1)'";
+    } else {
+        $tcpDst = 'any';
+        if ($aliasName !== '') {
+            mwexec('ipfw table 1 flush 2>/dev/null; true');
+        }
+    }
+
+    mwexec('ipfw add 100 divert ' . $divertPort .
+        ' tcp from any to ' . $tcpDst . ' 80,443 out not diverted not sockarg');
+
+    // UDP 443 (QUIC): add when Discord UDP or YouTube QUIC is enabled
+    if ($discordUdpOn || $youtubeQuicOn) {
+        mwexec('ipfw add 101 divert ' . $divertPort .
+            ' udp from any to any 443 out not diverted not sockarg');
+    }
+
+    // Discord voice/video UDP ports (only when Discord UDP is on)
+    if ($discordUdpOn) {
+        mwexec('ipfw add 102 divert ' . $divertPort .
+            ' udp from any to any 50000-65535 out not diverted not sockarg');
+    }
 }
 
 function zapret2_remove_ipfw_rule(): void
 {
     mwexec('ipfw delete 100 2>/dev/null; true');
+    mwexec('ipfw delete 101 2>/dev/null; true');
+    mwexec('ipfw delete 102 2>/dev/null; true');
+    mwexec('ipfw table 1 flush 2>/dev/null; true');
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +468,16 @@ function zapret2_start(): bool
     zapret2_log('adding IPFW divert rule');
     zapret2_add_ipfw_rule();
 
+    $cfg = zapret2_get_config();
+    if (($cfg['discord_enabled'] ?? '') === 'on') {
+        zapret2_write_discord_hostlist();
+        zapret2_log('discord hostlist written to ' . ZAPRET2_DISCORD_HOSTLIST);
+    }
+    if (($cfg['youtube_enabled'] ?? '') === 'on') {
+        zapret2_write_youtube_hostlist();
+        zapret2_log('youtube hostlist written to ' . ZAPRET2_YOUTUBE_HOSTLIST);
+    }
+
     $cmd = zapret2_build_command();
     zapret2_log('starting dvtws2: ' . $cmd);
 
@@ -277,36 +487,33 @@ function zapret2_start(): bool
 
 function zapret2_stop(): bool
 {
-    if (!file_exists(ZAPRET2_PID_FILE)) {
-        zapret2_log('no pid file found, nothing to stop');
-        zapret2_remove_ipfw_rule();
-        return true;
-    }
-
-    $pid = (int) trim(file_get_contents(ZAPRET2_PID_FILE));
-    if ($pid <= 0) {
-        @unlink(ZAPRET2_PID_FILE);
-        zapret2_remove_ipfw_rule();
-        return true;
-    }
-
-    if (posix_kill($pid, SIGTERM)) {
-        zapret2_log('sent SIGTERM to dvtws2 pid ' . $pid);
-        // Wait up to 3 seconds for clean exit
-        for ($i = 0; $i < 6; $i++) {
-            usleep(500000);
-            if (!posix_kill($pid, 0)) {
-                break;
+    // Kill by PID file first
+    if (file_exists(ZAPRET2_PID_FILE)) {
+        $pid = (int) trim(file_get_contents(ZAPRET2_PID_FILE));
+        if ($pid > 0 && posix_kill($pid, SIGTERM)) {
+            zapret2_log('sent SIGTERM to dvtws2 pid ' . $pid);
+            for ($i = 0; $i < 6; $i++) {
+                usleep(500000);
+                if (!posix_kill($pid, 0)) {
+                    break;
+                }
+            }
+            if (posix_kill($pid, 0)) {
+                posix_kill($pid, SIGKILL);
+                zapret2_log('sent SIGKILL to dvtws2 pid ' . $pid);
             }
         }
-        if (posix_kill($pid, 0)) {
-            posix_kill($pid, SIGKILL);
-            zapret2_log('sent SIGKILL to dvtws2 pid ' . $pid);
-        }
+        @unlink(ZAPRET2_PID_FILE);
     }
 
-    @unlink(ZAPRET2_PID_FILE);
+    // Kill any remaining dvtws2 processes not tracked by the PID file
+    mwexec('pkill -x dvtws2 2>/dev/null; true');
+    usleep(300000);
+    mwexec('pkill -9 -x dvtws2 2>/dev/null; true');
+
     zapret2_remove_ipfw_rule();
+    zapret2_reset_ipfw_sysctls();
+    zapret2_log('stopped');
     return true;
 }
 
@@ -334,12 +541,17 @@ function zapret2_get_status(): array
     }
 
     return [
-        'enabled'     => ($cfg['enabled'] ?? '') === 'on',
-        'running'     => $running,
-        'pids'        => $pids,
-        'profile'     => $cfg['profile'] ?? 'default',
-        'divert_port' => $cfg['divert_port'] ?? ZAPRET2_DIVERT_PORT,
-        'log_tail'    => $logLines,
+        'enabled'         => ($cfg['enabled'] ?? '') === 'on',
+        'running'         => $running,
+        'pids'            => $pids,
+        'profile'         => $cfg['profile'] ?? 'default',
+        'divert_port'     => $cfg['divert_port'] ?? ZAPRET2_DIVERT_PORT,
+        'alias_name'      => $cfg['alias_name'] ?? '',
+        'discord_enabled' => ($cfg['discord_enabled'] ?? '') === 'on',
+        'discord_udp'     => ($cfg['discord_udp_enabled'] ?? '') === 'on',
+        'youtube_enabled' => ($cfg['youtube_enabled'] ?? '') === 'on',
+        'youtube_quic'    => ($cfg['youtube_quic_enabled'] ?? '') === 'on',
+        'log_tail'        => $logLines,
     ];
 }
 
@@ -368,7 +580,14 @@ function zapret2_status_html(): string
         $logHtml .= htmlspecialchars($line) . "\n";
     }
 
-    $divertPort = htmlspecialchars((string) $s['divert_port']);
+    $divertPort    = htmlspecialchars((string) $s['divert_port']);
+    $aliasDisplay  = $s['alias_name'] !== '' ? htmlspecialchars($s['alias_name']) : '<em>none</em>';
+    $discordDisplay = $s['discord_enabled']
+        ? ('TCP ' . ($s['discord_udp'] ? '+ UDP' : 'only'))
+        : '<em>off</em>';
+    $youtubeDisplay = $s['youtube_enabled']
+        ? ('TCP ' . ($s['youtube_quic'] ? '+ QUIC' : 'only'))
+        : '<em>off</em>';
 
     return <<<HTML
 <div class="panel panel-default" id="zapret2-status-panel">
@@ -381,6 +600,12 @@ function zapret2_status_html(): string
       <dd>{$s['profile']}</dd>
       <dt>Divert Port</dt>
       <dd>{$divertPort}</dd>
+      <dt>Alias (include)</dt>
+      <dd>{$aliasDisplay}</dd>
+      <dt>Discord</dt>
+      <dd>{$discordDisplay}</dd>
+      <dt>YouTube</dt>
+      <dd>{$youtubeDisplay}</dd>
       <dt>Processes</dt>
       <dd>{$pidStr}</dd>
     </dl>
@@ -488,6 +713,221 @@ function zapret2_resync(): void
     }
 
     zapret2_log('resync: enabled=' . ($enabled ? 'yes' : 'no'));
+}
+
+// ---------------------------------------------------------------------------
+// Profile auto-tester
+// ---------------------------------------------------------------------------
+
+// HTTP test targets — mirrors zapret-discord-youtube targets.txt
+define('ZAPRET2_HTTP_TARGETS', serialize([
+    'DiscordMain'          => 'https://discord.com',
+    'DiscordGateway'       => 'https://gateway.discord.gg',
+    'DiscordCDN'           => 'https://cdn.discordapp.com',
+    'DiscordUpdates'       => 'https://updates.discord.com',
+    'YouTubeWeb'           => 'https://www.youtube.com',
+    'YouTubeShort'         => 'https://youtu.be',
+    'YouTubeImage'         => 'https://i.ytimg.com',
+    'YouTubeVideoRedirect' => 'https://redirector.googlevideo.com',
+    'GoogleMain'           => 'https://www.google.com',
+    'GoogleGstatic'        => 'https://www.gstatic.com',
+    'CloudflareWeb'        => 'https://www.cloudflare.com',
+    'CloudflareCDN'        => 'https://cdnjs.cloudflare.com',
+]));
+
+define('ZAPRET2_PING_TARGETS', serialize([
+    'CloudflareDNS1111' => '1.1.1.1',
+    'CloudflareDNS1001' => '1.0.0.1',
+    'GoogleDNS8888'     => '8.8.8.8',
+    'GoogleDNS8844'     => '8.8.4.4',
+    'Quad9DNS9999'      => '9.9.9.9',
+]));
+
+// DPI suite URL — fetched at test time from hyperion-cs project
+define('ZAPRET2_DPI_SUITE_URL', 'https://hyperion-cs.github.io/dpi-checkers/ru/tcp-16-20/suite.v2.json');
+
+function zapret2_test_profile(string $profile, array $cfg, string $testMode): array
+{
+    global $config;
+
+    $testCfg           = $cfg;
+    $testCfg['profile'] = $profile;
+    $config['installedpackages']['zapret2']['config'][0] = $testCfg;
+
+    zapret2_stop();
+    sleep(1);
+    $started = zapret2_start();
+
+    $results = ['started' => $started];
+
+    if ($started) {
+        sleep(2);
+        if ($testMode === 'http') {
+            $results['http']  = zapret2_run_http_test();
+        } elseif ($testMode === 'dpi') {
+            $results['dpi']   = zapret2_run_dpi_test();
+        }
+    }
+
+    $config['installedpackages']['zapret2']['config'][0] = $cfg;
+
+    return $results;
+}
+
+function zapret2_run_http_test(): array
+{
+    $httpTargets = unserialize(ZAPRET2_HTTP_TARGETS);
+    $pingTargets = unserialize(ZAPRET2_PING_TARGETS);
+    $results     = [];
+
+    foreach ($httpTargets as $name => $url) {
+        $results[$name] = [
+            'url'   => $url,
+            'http'  => zapret2_curl_check($url, ''),
+            'tls12' => zapret2_curl_check($url, 'tls12'),
+            'tls13' => zapret2_curl_check($url, 'tls13'),
+            'ping'  => zapret2_ping_check(parse_url($url, PHP_URL_HOST)),
+        ];
+    }
+
+    foreach ($pingTargets as $name => $ip) {
+        $results[$name] = [
+            'url'  => $ip,
+            'ping' => zapret2_ping_check($ip),
+        ];
+    }
+
+    return $results;
+}
+
+function zapret2_curl_check(string $url, string $tlsMode): array
+{
+    $timeout  = 5;
+    $baseArgs = '-s -I -o /dev/null -w "%{http_code}" --max-time ' . $timeout
+              . ' --connect-timeout ' . $timeout;
+
+    $tlsArgs = match ($tlsMode) {
+        'tls12' => ' --tlsv1.2 --tls-max 1.2',
+        'tls13' => ' --tlsv1.3 --tls-max 1.3',
+        default => ' --http1.1',
+    };
+
+    $cmd    = 'curl ' . $baseArgs . $tlsArgs . ' ' . escapeshellarg($url) . ' 2>&1';
+    $output = [];
+    $retval = 0;
+    exec($cmd, $output, $retval);
+
+    $raw    = trim(implode('', $output));
+    $code   = (int) preg_replace('/\D.*/', '', $raw);
+    $stderr = preg_replace('/^\d+/', '', $raw);
+
+    if (stripos($stderr, 'does not support') !== false
+        || stripos($stderr, 'not supported') !== false
+        || stripos($stderr, 'unsupported') !== false
+        || $retval === 35) {
+        return ['status' => 'UNSUP', 'code' => 0];
+    }
+
+    if ($retval === 0 && $code >= 100 && $code < 600) {
+        return ['status' => 'OK', 'code' => $code];
+    }
+
+    return ['status' => 'FAIL', 'code' => $code];
+}
+
+function zapret2_ping_check(string $host): array
+{
+    $output = [];
+    $retval = 0;
+    exec('ping -c 1 -W 2000 ' . escapeshellarg($host) . ' 2>/dev/null', $output, $retval);
+
+    if ($retval !== 0) {
+        return ['ok' => false, 'ms' => null];
+    }
+
+    foreach ($output as $line) {
+        if (preg_match('/time[=<]([\d.]+)\s*ms/i', $line, $m)) {
+            return ['ok' => true, 'ms' => (int) round((float) $m[1])];
+        }
+    }
+
+    return ['ok' => false, 'ms' => null];
+}
+
+function zapret2_run_dpi_test(): array
+{
+    // Fetch test suite from hyperion-cs
+    $suiteJson = @file_get_contents(ZAPRET2_DPI_SUITE_URL);
+    if ($suiteJson === false) {
+        return ['error' => 'Failed to fetch DPI suite from ' . ZAPRET2_DPI_SUITE_URL];
+    }
+
+    $suite = json_decode($suiteJson, true);
+    if (!is_array($suite)) {
+        return ['error' => 'Invalid DPI suite JSON'];
+    }
+
+    // Write 64KB random payload to temp file
+    $payloadFile = tempnam('/tmp', 'zapret2_dpi_');
+    $payload     = random_bytes(65536);
+    file_put_contents($payloadFile, $payload);
+
+    $results  = [];
+    $timeout  = 5;
+
+    foreach (array_slice($suite, 0, 20) as $target) {
+        $host     = $target['host'] ?? '';
+        $id       = $target['id']   ?? $host;
+        $provider = ($target['country'] ?? '') . ' ' . ($target['provider'] ?? '');
+        if ($host === '') {
+            continue;
+        }
+
+        $row = ['host' => $host, 'label' => trim($provider . ' ' . $id), 'checks' => []];
+
+        foreach (['http' => '--http1.1', 'tls12' => '--tlsv1.2 --tls-max 1.2', 'tls13' => '--tlsv1.3 --tls-max 1.3'] as $mode => $tlsArg) {
+            $cmd    = 'curl -s -X POST --data-binary @' . escapeshellarg($payloadFile)
+                    . ' -w "%{http_code} %{size_upload} %{size_download} %{time_total}"'
+                    . ' -o /dev/null -m ' . $timeout . ' ' . $tlsArg
+                    . ' ' . escapeshellarg('https://' . $host) . ' 2>/dev/null';
+            $out    = [];
+            $retval = 0;
+            exec($cmd, $out, $retval);
+
+            $parts    = preg_split('/\s+/', trim(implode('', $out)));
+            $code     = (int) ($parts[0] ?? 0);
+            $upBytes  = (int) ($parts[1] ?? 0);
+            $downBytes = (int) ($parts[2] ?? 0);
+            $timeSec  = (float) str_replace(',', '.', $parts[3] ?? '0');
+
+            // DPI freeze pattern: sent data, got nothing, timed out
+            $frozen = $upBytes > 1000 && $downBytes === 0 && $timeSec >= ($timeout - 0.5) && $retval !== 0;
+
+            if ($retval === 35 || $retval === 4) {
+                $status = 'UNSUP';
+            } elseif ($frozen) {
+                $status = 'BLOCKED';
+            } elseif ($retval === 0 && $code >= 100) {
+                $status = 'OK';
+            } else {
+                $status = 'FAIL';
+            }
+
+            $row['checks'][$mode] = [
+                'status'    => $status,
+                'code'      => $code,
+                'up_kb'     => round($upBytes / 1024, 1),
+                'down_kb'   => round($downBytes / 1024, 1),
+                'time_ms'   => (int) round($timeSec * 1000),
+            ];
+        }
+
+        $results[] = $row;
+    }
+
+    @unlink($payloadFile);
+
+    return $results;
 }
 
 // ---------------------------------------------------------------------------
