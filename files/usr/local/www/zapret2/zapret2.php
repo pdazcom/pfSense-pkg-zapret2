@@ -372,7 +372,7 @@ function z2Poll(taskId, mode) {
                 return;
             }
             z2RenderProgress(data);
-            if (data.status === 'done') {
+            if (data.status === 'done' || data.status === 'cancelled') {
                 z2StopPolling();
                 localStorage.removeItem(z2PollTaskFile);
             }

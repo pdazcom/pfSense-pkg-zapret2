@@ -55,7 +55,7 @@ update:
 	cp files/usr/local/etc/zapret2/profiles.conf         "$$STAGE/usr/local/etc/zapret2/profiles.conf"; \
 	cp scripts/healthcheck.sh                            "$$STAGE/usr/local/share/zapret2/healthcheck.sh"; \
 	cp scripts/configtest.sh                             "$$STAGE/usr/local/share/zapret2/configtest.sh"; \
-	tar --no-mac-metadata --no-xattrs -cf - -C "$$STAGE" usr 2>/dev/null \
+	tar -cf - -C "$$STAGE" usr 2>/dev/null \
 	| ssh $(SSH_OPTS) $(HOST) 'tar -xf - -C / && \
 		chmod 555  /usr/local/etc/rc.d/zapret2 && \
 		chmod 644  /usr/local/www/zapret2/zapret2.php \
