@@ -385,11 +385,17 @@ function stopTest() {
     var btn  = document.getElementById('btn-stop-test');
     if (btn) { btn.disabled = true; btn.textContent = 'Stopping...'; }
 
+    var taskId = z2ActiveTaskId;
     var form = z2CsrfForm();
     form.append('act', 'stop_test_ajax');
-    form.append('task_id', z2ActiveTaskId);
+    form.append('task_id', taskId);
 
     fetch(window.location.pathname, { method: 'POST', body: form })
+        .then(function(r) { return r.json(); })
+        .then(function() {
+            localStorage.removeItem(z2PollTaskFile);
+            z2Poll(taskId, null);
+        })
         .catch(function() {});
 }
 

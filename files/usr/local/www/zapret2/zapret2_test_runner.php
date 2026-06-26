@@ -90,9 +90,16 @@ foreach ($profiles as $profile) {
         $result = zapret2_run_dpi_test_incremental($taskFile, $state, $profile);
     }
 
+    $wasCancelled = !empty($result['cancelled']);
+    unset($result['cancelled']);
+
     $state['results'][$profile] = array_merge(['started' => true], $result);
     $state['updated_at'] = time();
     task_write($taskFile, $state);
+
+    if ($wasCancelled) {
+        break;
+    }
 }
 
 // Restore original service state
@@ -120,6 +127,10 @@ function zapret2_run_http_test_incremental(string $taskFile, array &$state, stri
     $targets     = [];
 
     foreach ($httpTargets as $name => $url) {
+        if ((task_read($taskFile)['status'] ?? '') === 'cancelled') {
+            return ['http' => $targets, 'cancelled' => true];
+        }
+
         $row = [
             'url'   => $url,
             'http'  => zapret2_curl_check($url, ''),
@@ -135,6 +146,10 @@ function zapret2_run_http_test_incremental(string $taskFile, array &$state, stri
     }
 
     foreach ($pingTargets as $name => $ip) {
+        if ((task_read($taskFile)['status'] ?? '') === 'cancelled') {
+            return ['http' => $targets, 'cancelled' => true];
+        }
+
         $targets[$name] = ['url' => $ip, 'ping' => zapret2_ping_check($ip)];
 
         $state['results'][$profile] = ['started' => true, 'http' => $targets];
@@ -164,6 +179,11 @@ function zapret2_run_dpi_test_incremental(string $taskFile, array &$state, strin
     $timeout = 5;
 
     foreach (array_slice($suite, 0, 20) as $target) {
+        if ((task_read($taskFile)['status'] ?? '') === 'cancelled') {
+            @unlink($payloadFile);
+            return ['dpi' => $targets, 'cancelled' => true];
+        }
+
         $host = $target['host'] ?? '';
         if ($host === '') {
             continue;
