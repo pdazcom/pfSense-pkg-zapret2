@@ -33,19 +33,8 @@ section() { printf '\n=== %s ===\n' "$*"; }
 # ---- Stop service ----
 section "Stopping zapret2 service"
 
-if [ -f /var/run/zapret2.pid ]; then
-    PID=$(cat /var/run/zapret2.pid)
-    if kill -0 "$PID" 2>/dev/null; then
-        kill "$PID" 2>/dev/null && info "Stopped dvtws2 (pid $PID)" || warn "Could not stop pid $PID"
-    fi
-    rm -f /var/run/zapret2.pid
-else
-    info "Service not running"
-fi
-
-# Remove IPFW divert rule if present
-if ipfw list 2>/dev/null | grep -q "divert"; then
-    ipfw delete 100 2>/dev/null && info "IPFW divert rule removed" || warn "Could not remove IPFW rule 100"
+if [ -f /usr/local/pkg/zapret2/includes/zapret2.inc ]; then
+    /usr/local/bin/php /usr/local/pkg/zapret2/includes/zapret2.inc stop
 fi
 
 # Disable on boot
@@ -59,6 +48,8 @@ fi
 section "Removing plugin files"
 
 rm -f /usr/local/www/zapret2/zapret2.php
+rm -f /usr/local/www/zapret2/zapret2_test_runner.php
+rm -f /usr/local/pkg/zapret2.xml
 rmdir /usr/local/www/zapret2 2>/dev/null && true
 
 rm -f /usr/local/pkg/zapret2/includes/zapret2.inc
@@ -72,6 +63,7 @@ rm -f /usr/local/share/zapret2/configtest.sh
 rmdir /usr/local/share/zapret2 2>/dev/null && true
 
 rm -f /var/log/zapret2.log
+rm -f /var/log/zapret2-test.log
 
 info "Plugin files removed"
 
@@ -94,6 +86,14 @@ if (is_array(\$config['installedpackages']['menu'] ?? null)) {
     if (count(\$config['installedpackages']['menu']) < \$before) {
         echo 'Menu entry removed' . PHP_EOL;
     }
+}
+
+// Remove package PF hook registration
+if (is_array(\$config['installedpackages']['package'] ?? null)) {
+    \$config['installedpackages']['package'] = array_values(array_filter(
+        \$config['installedpackages']['package'],
+        function(\$p) { return (\$p['name'] ?? '') !== 'zapret2'; }
+    ));
 }
 
 // Remove package config

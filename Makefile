@@ -9,6 +9,10 @@ ZAPRET2_VERSION ?= v0.9.5.2
 ZAPRET2_TARBALL = /tmp/zapret2-$(ZAPRET2_VERSION).tar.gz
 ZAPRET2_URL = https://github.com/bol-van/zapret2/releases/download/$(ZAPRET2_VERSION)/zapret2-$(ZAPRET2_VERSION).tar.gz
 
+# Local path to ipset file from zapret-discord-youtube (updated on Windows/local machine)
+IPSET_LOCAL ?= $(HOME)/Downloads/zapret-discord-youtube/.service/ipset-service.txt
+IPSET_REMOTE = /usr/local/etc/zapret2/ipset-all.txt
+
 # Download zapret2 tarball locally if not already cached
 $(ZAPRET2_TARBALL):
 	@echo "Downloading zapret2 $(ZAPRET2_VERSION)..."
@@ -19,7 +23,7 @@ install: $(ZAPRET2_TARBALL)
 	@if [ -n "$(HOST)" ]; then \
 		echo "=== Deploying to $(HOST) ==="; \
 		ssh $(HOST) 'mkdir -p /tmp/pfSense-pkg-zapret2'; \
-		scp -r files scripts install.sh "$(ZAPRET2_TARBALL)" $(HOST):/tmp/pfSense-pkg-zapret2/; \
+		scp -r files scripts pkg install.sh "$(ZAPRET2_TARBALL)" $(HOST):/tmp/pfSense-pkg-zapret2/; \
 		ssh $(HOST) 'cd /tmp/pfSense-pkg-zapret2 && sh install.sh --tarball /tmp/pfSense-pkg-zapret2/$(notdir $(ZAPRET2_TARBALL))'; \
 	else \
 		echo "=== Installing locally ==="; \
@@ -53,10 +57,11 @@ update:
 	cp files/usr/local/pkg/zapret2/includes/zapret2.inc  "$$STAGE/usr/local/pkg/zapret2/includes/zapret2.inc"; \
 	cp files/usr/local/etc/rc.d/zapret2                  "$$STAGE/usr/local/etc/rc.d/zapret2"; \
 	cp files/usr/local/etc/zapret2/profiles.conf         "$$STAGE/usr/local/etc/zapret2/profiles.conf"; \
+	cp pkg/zapret2.xml "$$STAGE/usr/local/pkg/zapret2.xml"; \
 	cp scripts/healthcheck.sh                            "$$STAGE/usr/local/share/zapret2/healthcheck.sh"; \
 	cp scripts/configtest.sh                             "$$STAGE/usr/local/share/zapret2/configtest.sh"; \
-	tar -cf - -C "$$STAGE" usr 2>/dev/null \
-	| ssh $(SSH_OPTS) $(HOST) 'tar -xf - -C / && \
+	COPYFILE_DISABLE=1 tar -cf - -C "$$STAGE" usr 2>/dev/null \
+	| ssh $(SSH_OPTS) $(HOST) 'tar -xf - -C / --no-same-owner 2>/dev/null; \
 		chmod 555  /usr/local/etc/rc.d/zapret2 && \
 		chmod 644  /usr/local/www/zapret2/zapret2.php \
 		           /usr/local/www/zapret2/zapret2_test_runner.php \
@@ -64,13 +69,18 @@ update:
 		           /usr/local/etc/zapret2/profiles.conf && \
 		chmod 755  /usr/local/share/zapret2/healthcheck.sh \
 		           /usr/local/share/zapret2/configtest.sh && \
+		/usr/local/bin/php -r '\''require_once("/etc/inc/globals.inc"); require_once("/etc/inc/config.inc"); require_once("/etc/inc/functions.inc"); require_once("/usr/local/pkg/zapret2/includes/zapret2.inc"); zapret2_install();'\'' && \
 		echo Done.'; \
 	rm -rf "$$STAGE"
 
 check:
 	@echo "=== PHP lint ==="
 	php -l files/usr/local/www/zapret2/zapret2.php
+	php -l files/usr/local/www/zapret2/zapret2_test_runner.php
 	php -l files/usr/local/pkg/zapret2/includes/zapret2.inc
+	@echo "=== PF rule checks ==="
+	php tests/pf_rules.php
+	php tests/runner_failure.php
 	@echo "=== Shell lint ==="
 	sh -n files/usr/local/etc/rc.d/zapret2
 	sh -n scripts/healthcheck.sh
@@ -78,7 +88,7 @@ check:
 	sh -n install.sh
 	sh -n uninstall.sh
 	@echo "=== XML ==="
-	xmllint --noout pkg/zapret2.xml 2>/dev/null && echo "zapret2.xml OK" || true
+	xmllint --noout pkg/zapret2.xml
 	@echo "=== All checks passed ==="
 
 .PHONY: install uninstall update check

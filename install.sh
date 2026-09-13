@@ -115,6 +115,8 @@ fi
 # ---- Install plugin files ----
 section "Installing pfSense-pkg-zapret2 plugin"
 
+install -m 0644 "$PLUGIN_DIR/pkg/zapret2.xml" /usr/local/pkg/zapret2.xml
+
 install -d /usr/local/www/zapret2
 install -d /usr/local/pkg/zapret2/includes
 install -d /usr/local/etc/zapret2
@@ -122,6 +124,9 @@ install -d /usr/local/share/zapret2
 
 install -m 0644 "$PLUGIN_DIR/files/usr/local/www/zapret2/zapret2.php" \
     /usr/local/www/zapret2/zapret2.php
+
+install -m 0644 "$PLUGIN_DIR/files/usr/local/www/zapret2/zapret2_test_runner.php" \
+    /usr/local/www/zapret2/zapret2_test_runner.php
 
 install -m 0644 "$PLUGIN_DIR/files/usr/local/pkg/zapret2/includes/zapret2.inc" \
     /usr/local/pkg/zapret2/includes/zapret2.inc
@@ -179,7 +184,7 @@ if (!\$found) {
 }
 zapret2_install();
 echo 'Install hook done' . PHP_EOL;
-" || warn "pfSense registration failed (may be OK if running outside pfSense)"
+" || die "pfSense registration failed; the package filter hook is required"
 
 # ---- Validation ----
 section "Validating installation"

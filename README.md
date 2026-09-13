@@ -13,7 +13,8 @@ On FreeBSD/pfSense, zapret2 uses `dvtws2` — a divert-socket based engine (not 
 - Adds a **Services → Zapret2** page to the pfSense web interface
 - Downloads and installs the zapret2 backend (`dvtws2` + Lua files) automatically via `make install`
 - Manages the service lifecycle (start/stop/restart) via FreeBSD rc.d
-- Loads required kernel modules (`ipfw`, `ipdivert`) and sets up IPFW divert rules on start
+- Supports IPFW divert and opt-in PF divert for IPv4 LAN clients on pfSense 2.8.x
+- Registers PF rules through the pfSense package filter hook so they are regenerated on firewall Apply
 - **YouTube DPI bypass** — hostlist filter for YouTube and Google Video domains (youtube.com, googlevideo.com, ytimg.com, etc.); optional UDP 443 divert for QUIC/HTTP3
 - **Discord DPI bypass** — hostlist filter for Discord domains; optional UDP divert for voice/video (UDP 443 + 50000–65535)
 - **Alias include mode** — restrict processing to specific IP/CIDR firewall alias (ipfw table 1)
@@ -24,7 +25,8 @@ On FreeBSD/pfSense, zapret2 uses `dvtws2` — a divert-socket based engine (not 
 ## What It Does NOT Do
 
 - Does **not** guarantee bypass effectiveness — results depend on your ISP's DPI system
-- Does **not** modify pfSense firewall/NAT rules — uses IPFW divert which is separate from pf
+- PF mode adds early allow/divert rules for explicitly selected LAN/OPT subnets; normal firewall restrictions and policy routing do not apply to matching traffic
+- Does **not** edit pfSense core files or manually patch `/tmp/rules.debug`
 - Does **not** modify any existing pfSense configuration outside its own config section
 - Does **not** reboot the system automatically
 
@@ -32,11 +34,12 @@ On FreeBSD/pfSense, zapret2 uses `dvtws2` — a divert-socket based engine (not 
 
 | pfSense Version | Status |
 |----------------|--------|
+| 2.8.x (CE)     | PF backend; lifecycle verified on 2.8.1, LAN validation required |
 | 2.7.x (CE)     | Tested |
 | 2.6.x (CE)     | Should work |
 | 23.09+ (Plus)  | Should work |
 
-FreeBSD 14.x and 13.x, amd64 only.
+FreeBSD 13.x/14.x with IPFW; FreeBSD 15 with PF. amd64 only.
 
 ## Quick Start
 
@@ -51,6 +54,10 @@ make install HOST=root@<pfsense-ip>
 ```
 
 Then open **Services → Zapret2** in the pfSense GUI, select a profile, click **Apply**.
+
+For pfSense 2.8.x, choose **PF divert**, select the LAN/OPT interfaces, and explicitly enable **PF Traffic Allowance**. PF processes IPv4 traffic from those interface subnets and excludes router addresses. TCP 80/443 is enabled; QUIC and Discord UDP remain optional. Reconnect existing client sessions after enabling.
+
+The built-in Profile Tester runs on the router and cannot evaluate this LAN-only PF path. PF mode explains this instead of starting a misleading test; use a LAN client. For IPFW tests, missing/crashed runners now report errors and write diagnostics to `/var/log/zapret2-test.log`.
 
 See [INSTALL.md](INSTALL.md) for the full guide.
 

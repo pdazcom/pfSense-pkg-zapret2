@@ -24,9 +24,10 @@
     -->
     <package>
       <name>zapret2</name>
-      <version>1.0.0</version>
+      <version>1.1.0</version>
       <descr><![CDATA[Zapret2 DPI bypass — GUI management plugin]]></descr>
-      <pkginfolink>https://github.com/your-org/pfSense-pkg-zapret2</pkginfolink>
+      <configurationfile>zapret2.xml</configurationfile>
+      <filter_rule_function>zapret2_generate_rules</filter_rule_function>
       <include_file>/usr/local/pkg/zapret2/includes/zapret2.inc</include_file>
     </package>
 
@@ -53,6 +54,10 @@
         <item>
           <enabled>on</enabled>
           <profile>default</profile>
+          <!-- PF is opt-in; select pf and explicitly accept its early allow rules. -->
+          <firewall_backend>ipfw</firewall_backend>
+          <pf_interfaces>lan</pf_interfaces>
+          <pf_allow></pf_allow>
           <divert_port>990</divert_port>
           <custom_args></custom_args>
           <debug></debug>

@@ -18,6 +18,7 @@ define('ZAPRET2_CONF_DIR',     '/usr/local/etc/zapret2');
 define('ZAPRET2_PROFILES_CONF','/usr/local/etc/zapret2/profiles.conf');
 define('ZAPRET2_LOG_FILE',     '/var/log/zapret2.log');
 define('ZAPRET2_PID_FILE',     '/var/run/zapret2.pid');
+define('ZAPRET2_ACTIVE_FILE',  '/var/run/zapret2-active.json');
 define('ZAPRET2_DIVERT_PORT',    990);
 define('ZAPRET2_TAG',            'pfSense-pkg-zapret2');
 define('ZAPRET2_DISCORD_HOSTLIST', '/usr/local/etc/zapret2/discord-hostlist.txt');
@@ -162,6 +163,34 @@ function zapret2_get_profile_args(string $profile, array $cfg = []): array
                 '--lua-desync=multisplit:pos=midsld',
             ];
 
+        case 'hostfakesplit':
+            // fake TLS with TCP MD5 fooling + hostfakesplit — ALT9-style; works where seqovl-based methods fail
+            return [
+                '--lua-desync=fake:blob=fake_default_tls:tcp_md5',
+                '--lua-desync=hostfakesplit',
+            ];
+
+        case 'fake_multisplit_seqovl':
+            // fake + multisplit with seqovl and TLS pattern — ALT11/ALT12 style
+            return [
+                '--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=8',
+                '--lua-desync=multisplit:pos=1:seqovl=681',
+            ];
+
+        case 'fake_ts':
+            // fake with timestamp fooling (ts) instead of md5sig — lighter on some DPI systems
+            return [
+                '--lua-desync=fake:blob=fake_default_tls:ts:repeats=6',
+                '--lua-desync=multisplit:pos=1',
+            ];
+
+        case 'fake_disorder_sni':
+            // fake TLS with rnd+dupsid+sni=www.google.com + multidisorder — ALT3/FAKE TLS AUTO style
+            return [
+                '--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=11:tls_mod=rnd,dupsid,sni=www.google.com',
+                '--lua-desync=multidisorder:pos=1,midsld',
+            ];
+
         case 'custom':
             // User-supplied raw arguments — used verbatim (validated for printable chars only)
             $raw = zapret2_sanitize_args($cfg['custom_args'] ?? '');
@@ -217,6 +246,7 @@ function zapret2_write_youtube_hostlist(): void
         'wide-youtube.l.google.com',
         'youtubekids.com',
         '*.youtubekids.com',
+        'youtube.googleapis.com',
         'youtubei.googleapis.com',
         'youtubeembeddedplayer.googleapis.com',
         'yt-video-upload.l.google.com',
@@ -313,19 +343,21 @@ function zapret2_build_command(): string
     $parts[] = '--lua-init=@' . escapeshellarg(ZAPRET2_LUA_DIR . '/zapret-lib.lua');
     $parts[] = '--lua-init=@' . escapeshellarg(ZAPRET2_LUA_DIR . '/zapret-antidpi.lua');
 
+    // For non-custom profiles: prepend hostlist args before desync args so they
+    // apply to the single implicit profile. For custom profile: the user manages
+    // hostlists inside their own args (with --new separators), so we skip them.
+    if ($profile !== 'custom') {
+        if (($cfg['discord_enabled'] ?? '') === 'on') {
+            $parts[] = '--hostlist=' . escapeshellarg(ZAPRET2_DISCORD_HOSTLIST);
+        }
+        if (($cfg['youtube_enabled'] ?? '') === 'on') {
+            $parts[] = '--hostlist=' . escapeshellarg(ZAPRET2_YOUTUBE_HOSTLIST);
+        }
+    }
+
     // Append profile Lua desync arguments
     foreach ($args as $arg) {
         $parts[] = $arg;
-    }
-
-    // Discord hostlist filter
-    if (($cfg['discord_enabled'] ?? '') === 'on') {
-        $parts[] = '--hostlist=' . escapeshellarg(ZAPRET2_DISCORD_HOSTLIST);
-    }
-
-    // YouTube hostlist filter
-    if (($cfg['youtube_enabled'] ?? '') === 'on') {
-        $parts[] = '--hostlist=' . escapeshellarg(ZAPRET2_YOUTUBE_HOSTLIST);
     }
 
     // Debug logging
@@ -344,6 +376,159 @@ function zapret2_build_command_dry(): string
 // ---------------------------------------------------------------------------
 // Firewall / kernel setup helpers
 // ---------------------------------------------------------------------------
+
+// PF divert is opt-in: its early pass rules explicitly allow the selected traffic.
+// pfSense invokes this package hook during every filter regeneration.
+function zapret2_backend(?array $cfg = null): string
+{
+    $cfg = $cfg ?? zapret2_get_config();
+    return ($cfg['firewall_backend'] ?? 'ipfw') === 'pf' ? 'pf' : 'ipfw';
+}
+
+function zapret2_pf_interfaces(): array
+{
+    global $config;
+    $interfaces = [];
+    foreach ($config['interfaces'] ?? [] as $name => $iface) {
+        if ($name !== 'wan' && isset($iface['enable']) && !empty($iface['if'])) {
+            $interfaces[$name] = $iface['descr'] ?? strtoupper($name);
+        }
+    }
+    return $interfaces;
+}
+
+function zapret2_pf_rules(array $cfg): string
+{
+    global $config;
+    if (PHP_OS_FAMILY === 'FreeBSD' && (int) php_uname('r') < 15) {
+        throw new RuntimeException('PF divert requires FreeBSD 15 / pfSense CE 2.8.x or later.');
+    }
+    if (($cfg['pf_allow'] ?? '') !== 'on') {
+        throw new RuntimeException('Confirm the PF traffic allowance before enabling PF divert.');
+    }
+    $selected = array_filter(explode(',', $cfg['pf_interfaces'] ?? ''));
+    if (!$selected || array_diff($selected, array_keys(zapret2_pf_interfaces()))) {
+        throw new RuntimeException('Select at least one enabled LAN/OPT interface for PF divert.');
+    }
+    $port = zapret2_sanitize_port((int) ($cfg['divert_port'] ?? ZAPRET2_DIVERT_PORT));
+    $alias = $cfg['alias_name'] ?? '';
+    $dst = '! (self)';
+    if ($alias !== '' && ($cfg['youtube_enabled'] ?? '') !== 'on' && ($cfg['discord_enabled'] ?? '') !== 'on') {
+        $valid = false;
+        foreach ($config['aliases']['alias'] ?? [] as $entry) {
+            if (($entry['name'] ?? '') === $alias && in_array($entry['type'] ?? '', ['host', 'network', 'urltable'], true)) {
+                $valid = true;
+            }
+        }
+        if (!$valid || !preg_match('/^[a-zA-Z0-9_]+$/D', $alias)) {
+            throw new RuntimeException('PF destination alias is missing or invalid.');
+        }
+        $dst = '<' . $alias . '>';
+    }
+    $rules = '';
+    foreach ($selected as $name) {
+        if (!preg_match('/^[a-zA-Z0-9_]+$/D', $name)) {
+            throw new RuntimeException('Invalid configured interface key.');
+        }
+        $iface = $config['interfaces'][$name]['if'];
+        if (!preg_match('/^[a-zA-Z0-9_.]+$/D', $iface)) {
+            throw new RuntimeException('Invalid PF interface name.');
+        }
+        // The outer anchor never matches router addresses, including alias mode.
+        $rules .= 'anchor "zapret2_' . $name . '" in quick on ' . $iface . ' inet from (' . $iface . ':network) to ! (self) {' . "\n";
+        $common = ' from (' . $iface . ':network) to ' . $dst;
+        $end = ' divert-to 127.0.0.1 port ' . $port . ' keep state label "zapret2"' . "\n";
+        $rules .= 'pass in quick inet proto tcp' . $common . ' port { 80, 443 }' . $end;
+        if (($cfg['youtube_quic_enabled'] ?? '') === 'on' || ($cfg['discord_udp_enabled'] ?? '') === 'on') {
+            $rules .= 'pass in quick inet proto udp' . $common . ' port 443' . $end;
+        }
+        if (($cfg['discord_udp_enabled'] ?? '') === 'on') {
+            $rules .= 'pass in quick inet proto udp' . $common . ' port 50000:65535' . $end;
+        }
+        $rules .= "}\n";
+    }
+    return $rules;
+}
+
+function zapret2_active_config(): array
+{
+    return json_decode(@file_get_contents(ZAPRET2_ACTIVE_FILE) ?: '{}', true) ?: [];
+}
+
+function zapret2_generate_rules(string $type): string
+{
+    $cfg = zapret2_active_config();
+    if ($type !== 'pfearly' || zapret2_backend($cfg) !== 'pf' || !zapret2_is_running()) {
+        return '';
+    }
+    try {
+        return zapret2_pf_rules($cfg);
+    } catch (Throwable $e) {
+        zapret2_log('PF rules not generated: ' . $e->getMessage());
+        return '';
+    }
+}
+
+function zapret2_reload_pf(): bool
+{
+    $expected = zapret2_generate_rules('pfearly') !== '';
+    if (!zapret2_pf_enabled()) {
+        // Do not let filter_configure_sync silently re-enable a disabled firewall.
+        if ($expected) {
+            zapret2_log('PF is disabled; enable the pfSense firewall before using PF divert');
+            return false;
+        }
+        $anchors = shell_exec('/sbin/pfctl -s Anchors 2>/dev/null') ?? '';
+        foreach (explode("\n", $anchors) as $anchor) {
+            $anchor = trim($anchor);
+            if (preg_match('/^zapret2_[a-zA-Z0-9_]+$/D', $anchor)
+                && mwexec('/sbin/pfctl -a ' . escapeshellarg($anchor) . ' -F rules') !== 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+    require_once('/etc/inc/filter.inc');
+    require_once('/etc/inc/shaper.inc');
+    require_once('/etc/inc/ipsec.inc');
+    require_once('/etc/inc/vpn.inc');
+    filter_configure_sync();
+    // Verify the running ruleset, not just a successful generator invocation.
+    $rules = shell_exec('/sbin/pfctl -a "*" -sr 2>/dev/null') ?? '';
+    return (strpos($rules, 'label "zapret2"') !== false) === $expected;
+}
+
+function zapret2_pf_enabled(): bool
+{
+    return preg_match('/^Status:\s+Enabled\b/m', shell_exec('/sbin/pfctl -si 2>/dev/null') ?? '') === 1;
+}
+
+function zapret2_register_pf_hook(): void
+{
+    global $config;
+    $packages = $config['installedpackages']['package'] ?? [];
+    foreach ($packages as &$package) {
+        if (($package['name'] ?? '') === 'zapret2') {
+            $package['version'] = '1.1.0';
+            $package['configurationfile'] = 'zapret2.xml';
+            $package['include_file'] = '/usr/local/pkg/zapret2/includes/zapret2.inc';
+            $package['filter_rule_function'] = 'zapret2_generate_rules';
+            $config['installedpackages']['package'] = $packages;
+            write_config('Zapret2: register PF filter hook');
+            return;
+        }
+    }
+    unset($package);
+    $packages[] = [
+        'name'                => 'zapret2',
+        'version'             => '1.1.0',
+        'configurationfile'   => 'zapret2.xml',
+        'include_file'        => '/usr/local/pkg/zapret2/includes/zapret2.inc',
+        'filter_rule_function' => 'zapret2_generate_rules',
+    ];
+    $config['installedpackages']['package'] = $packages;
+    write_config('Zapret2: register PF filter hook');
+}
 
 function zapret2_load_kernel_modules(): void
 {
@@ -384,32 +569,35 @@ function zapret2_add_ipfw_rule(): void
     mwexec('ipfw delete 101 2>/dev/null; true');
     mwexec('ipfw delete 102 2>/dev/null; true');
 
+    // Destination selector shared by TCP and UDP divert rules.
     // When any hostlist mode is on, use 'any' — dvtws2 filters by domain itself.
-    // When both are off, optionally restrict to alias table(1).
+    // When both are off, optionally restrict to alias table(1). Applying the same
+    // restriction to UDP prevents the QUIC fake from hitting unrelated UDP 443
+    // traffic such as DNS-over-QUIC, which otherwise breaks name resolution.
     if ($discordOn || $youtubeOn) {
-        $tcpDst = 'any';
+        $dst = 'any';
     } elseif ($aliasName !== '' && zapret2_resolve_alias_to_table()) {
-        $tcpDst = "'table(1)'";
+        $dst = "'table(1)'";
     } else {
-        $tcpDst = 'any';
+        $dst = 'any';
         if ($aliasName !== '') {
             mwexec('ipfw table 1 flush 2>/dev/null; true');
         }
     }
 
     mwexec('ipfw add 100 divert ' . $divertPort .
-        ' tcp from any to ' . $tcpDst . ' 80,443 out not diverted not sockarg');
+        ' tcp from any to ' . $dst . ' 80,443 out not diverted not sockarg');
 
     // UDP 443 (QUIC): add when Discord UDP or YouTube QUIC is enabled
     if ($discordUdpOn || $youtubeQuicOn) {
         mwexec('ipfw add 101 divert ' . $divertPort .
-            ' udp from any to any 443 out not diverted not sockarg');
+            ' udp from any to ' . $dst . ' 443 out not diverted not sockarg');
     }
 
     // Discord voice/video UDP ports (only when Discord UDP is on)
     if ($discordUdpOn) {
         mwexec('ipfw add 102 divert ' . $divertPort .
-            ' udp from any to any 50000-65535 out not diverted not sockarg');
+            ' udp from any to ' . $dst . ' 50000-65535 out not diverted not sockarg');
     }
 }
 
@@ -459,14 +647,23 @@ function zapret2_start(): bool
         return true;
     }
 
-    zapret2_log('loading kernel modules');
-    zapret2_load_kernel_modules();
-
-    zapret2_log('configuring IPFW sysctls');
-    zapret2_set_ipfw_sysctls();
-
-    zapret2_log('adding IPFW divert rule');
-    zapret2_add_ipfw_rule();
+    $cfg = zapret2_get_config();
+    if (zapret2_backend($cfg) === 'pf') {
+        if (!zapret2_pf_enabled()) {
+            zapret2_log('PF is disabled; enable the pfSense firewall before using PF divert');
+            return false;
+        }
+        try {
+            zapret2_pf_rules($cfg);
+        } catch (Throwable $e) {
+            zapret2_log($e->getMessage());
+            return false;
+        }
+        mwexec('kldload ipdivert 2>/dev/null');
+    } else {
+        zapret2_load_kernel_modules();
+        zapret2_set_ipfw_sysctls();
+    }
 
     $cfg = zapret2_get_config();
     if (($cfg['discord_enabled'] ?? '') === 'on') {
@@ -482,11 +679,51 @@ function zapret2_start(): bool
     zapret2_log('starting dvtws2: ' . $cmd);
 
     $ret = mwexec($cmd . ' >> ' . escapeshellarg(ZAPRET2_LOG_FILE) . ' 2>&1');
-    return $ret === 0;
+    // The daemon parent can exit before its child has written the PID file.
+    for ($i = 0; $ret === 0 && !zapret2_is_running() && $i < 30; $i++) {
+        usleep(100000);
+        clearstatcache(true, ZAPRET2_PID_FILE);
+    }
+    if ($ret !== 0 || !zapret2_is_running()) {
+        zapret2_log('dvtws2 failed to start');
+        return false;
+    }
+    file_put_contents(ZAPRET2_ACTIVE_FILE, json_encode($cfg), LOCK_EX);
+    chmod(ZAPRET2_ACTIVE_FILE, 0600);
+    if (zapret2_backend($cfg) === 'pf') {
+        if (!zapret2_reload_pf()) {
+            zapret2_log('Failed to activate PF divert rules');
+            zapret2_stop();
+            return false;
+        }
+    } else {
+        zapret2_add_ipfw_rule();
+    }
+    return true;
 }
 
 function zapret2_stop(): bool
 {
+    $active = zapret2_active_config();
+    $backend = zapret2_backend($active);
+    $ipfwActive = zapret2_ipfw_rules_active();
+    @unlink(ZAPRET2_ACTIVE_FILE);
+    if ($backend === 'pf') {
+        if (!zapret2_reload_pf()) {
+            // Keep the listener alive if rules could not be removed.
+            file_put_contents(ZAPRET2_ACTIVE_FILE, json_encode($active), LOCK_EX);
+            zapret2_log('Failed to remove PF rules; service left running');
+            return false;
+        }
+        mwexec('/sbin/pfctl -k label -k zapret2 2>/dev/null');
+    }
+    // An upgrade from a legacy IPFW installation may predate the active-state
+    // file. Always remove package-owned divert rules before stopping the daemon.
+    if ($ipfwActive && mwexec('kldstat -q -m ipfw') === 0) {
+        zapret2_remove_ipfw_rule();
+        zapret2_reset_ipfw_sysctls();
+    }
+
     // Kill by PID file first
     if (file_exists(ZAPRET2_PID_FILE)) {
         $pid = (int) trim(file_get_contents(ZAPRET2_PID_FILE));
@@ -511,15 +748,21 @@ function zapret2_stop(): bool
     usleep(300000);
     mwexec('pkill -9 -x dvtws2 2>/dev/null; true');
 
-    zapret2_remove_ipfw_rule();
-    zapret2_reset_ipfw_sysctls();
     zapret2_log('stopped');
     return true;
 }
 
+function zapret2_ipfw_rules_active(): bool
+{
+    $rules = shell_exec('/sbin/ipfw list 2>/dev/null') ?? '';
+    return preg_match('/^0*10[012]\s+divert\s+/m', $rules) === 1;
+}
+
 function zapret2_restart(): bool
 {
-    zapret2_stop();
+    if (!zapret2_stop()) {
+        return false;
+    }
     sleep(1);
     return zapret2_start();
 }
@@ -543,6 +786,7 @@ function zapret2_get_status(): array
     return [
         'enabled'         => ($cfg['enabled'] ?? '') === 'on',
         'running'         => $running,
+        'backend'         => zapret2_backend($running ? (zapret2_active_config() ?: $cfg) : $cfg),
         'pids'            => $pids,
         'profile'         => $cfg['profile'] ?? 'default',
         'divert_port'     => $cfg['divert_port'] ?? ZAPRET2_DIVERT_PORT,
@@ -598,6 +842,8 @@ function zapret2_status_html(): string
       <dd>{$enabledBadge} {$runningBadge}</dd>
       <dt>Profile</dt>
       <dd>{$s['profile']}</dd>
+      <dt>Firewall backend</dt>
+      <dd>{$s['backend']}</dd>
       <dt>Divert Port</dt>
       <dd>{$divertPort}</dd>
       <dt>Alias (include)</dt>
@@ -689,17 +935,24 @@ function zapret2_install(): void
         zapret2_log('WARNING: zapret-antidpi.lua not found in ' . ZAPRET2_LUA_DIR . ' — install zapret2 backend first');
     }
 
+    zapret2_register_pf_hook();
+    if (!file_exists('/var/log/zapret2-test.log')) {
+        touch('/var/log/zapret2-test.log');
+    }
+    chmod('/var/log/zapret2-test.log', 0600);
     zapret2_log('package installed');
 }
 
 function zapret2_deinstall(): void
 {
-    zapret2_stop();
+    if (!zapret2_stop()) {
+        throw new RuntimeException('Cannot uninstall Zapret2 while its firewall rules are active.');
+    }
     zapret2_set_rcconf(false);
     zapret2_log('package deinstalled');
 }
 
-function zapret2_resync(): void
+function zapret2_resync(): bool
 {
     $cfg = zapret2_get_config();
     $enabled = ($cfg['enabled'] ?? '') === 'on';
@@ -707,12 +960,13 @@ function zapret2_resync(): void
     zapret2_set_rcconf($enabled);
 
     if ($enabled) {
-        zapret2_restart();
+        $ok = zapret2_restart();
     } else {
-        zapret2_stop();
+        $ok = zapret2_stop();
     }
 
     zapret2_log('resync: enabled=' . ($enabled ? 'yes' : 'no'));
+    return $ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -954,6 +1208,7 @@ if (php_sapi_name() === 'cli' && isset($argv[0]) && basename($argv[0]) === 'zapr
             $s = zapret2_get_status();
             echo 'enabled: '      . ($s['enabled'] ? 'yes' : 'no') . "\n";
             echo 'running: '      . ($s['running'] ? 'yes' : 'no') . "\n";
+            echo 'backend: ' . $s['backend'] . "\n";
             echo 'profile: '      . $s['profile'] . "\n";
             echo 'divert_port: '  . $s['divert_port'] . "\n";
             $allPids = [];

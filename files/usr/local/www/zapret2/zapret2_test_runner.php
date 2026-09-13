@@ -12,11 +12,6 @@ if (php_sapi_name() !== 'cli') {
     exit(1);
 }
 
-require_once('/etc/inc/globals.inc');
-require_once('/etc/inc/config.inc');
-require_once('/etc/inc/functions.inc');
-require_once('/usr/local/pkg/zapret2/includes/zapret2.inc');
-
 $taskId  = preg_replace('/[^a-f0-9]/', '', $argv[1] ?? '');
 $mode    = in_array($argv[2] ?? '', ['http', 'dpi'], true) ? $argv[2] : 'http';
 $profiles = json_decode($argv[3] ?? '[]', true);
@@ -29,8 +24,12 @@ $taskFile = '/tmp/zapret2_task_' . $taskId . '.json';
 
 function task_write(string $taskFile, array $state): void
 {
-    file_put_contents($taskFile, json_encode($state));
-    chmod($taskFile, 0600);
+    $tmp = $taskFile . '.' . getmypid() . '.tmp';
+    if (file_put_contents($tmp, json_encode($state, JSON_THROW_ON_ERROR), LOCK_EX) === false) {
+        throw new RuntimeException('Cannot write test progress');
+    }
+    chmod($tmp, 0600);
+    rename($tmp, $taskFile);
 }
 
 function task_read(string $taskFile): array
@@ -38,12 +37,20 @@ function task_read(string $taskFile): array
     if (!file_exists($taskFile)) {
         return [];
     }
-    return json_decode(file_get_contents($taskFile), true) ?? [];
+    $state = json_decode(file_get_contents($taskFile), true) ?? [];
+    if (file_exists($taskFile . '.cancel')) {
+        $state['status'] = 'cancelled';
+    }
+    if (time() - ($state['started_at'] ?? time()) > 1800) {
+        throw new RuntimeException('Profile test exceeded the 30 minute limit');
+    }
+    return $state;
 }
 
 $state = [
     'task_id'   => $taskId,
     'status'    => 'running',
+    'pid'       => getmypid(),
     'mode'      => $mode,
     'profiles'  => $profiles,
     'current'   => null,
@@ -53,61 +60,114 @@ $state = [
 ];
 task_write($taskFile, $state);
 
-$cfg = zapret2_get_config();
-
-foreach ($profiles as $profile) {
-    // Check if cancelled between profiles
-    $fresh = task_read($taskFile);
-    if (($fresh['status'] ?? '') === 'cancelled') {
-        break;
+// Report even bootstrap/fatal errors, and restore the service on every exit path.
+$cfg = null;
+$wasRunning = false;
+$restoreCfg = null;
+$serviceChanged = false;
+$finished = false;
+$runnerLock = null;
+register_shutdown_function(function () use (&$state, $taskFile, &$restoreCfg, &$wasRunning, &$serviceChanged, &$finished, &$runnerLock) {
+    global $config;
+    if (!$finished) {
+        $state['status'] = 'error';
+        $state['error'] = $state['error'] ?? 'Profile runner terminated unexpectedly; see /var/log/zapret2-test.log';
     }
-
-    $state['current']    = $profile;
+    try {
+        if ($serviceChanged) {
+            $config['installedpackages']['zapret2']['config'][0] = $restoreCfg;
+            if (!zapret2_stop() || ($wasRunning && !zapret2_start())) {
+                throw new RuntimeException('Failed to restore the original service state');
+            }
+        }
+    } catch (Throwable $e) {
+        $state['status'] = 'error';
+        $state['error'] = $e->getMessage();
+    }
+    $state['current'] = null;
     $state['updated_at'] = time();
     task_write($taskFile, $state);
+    @unlink($taskFile . '.cancel');
+    if (is_resource($runnerLock)) {
+        flock($runnerLock, LOCK_UN);
+        fclose($runnerLock);
+    }
+});
 
-    global $config;
-    $testCfg            = $cfg;
-    $testCfg['profile'] = $profile;
-    $config['installedpackages']['zapret2']['config'][0] = $testCfg;
+try {
+    require_once('/etc/inc/globals.inc');
+    require_once('/etc/inc/config.inc');
+    require_once('/etc/inc/functions.inc');
+    require_once('/usr/local/pkg/zapret2/includes/zapret2.inc');
 
-    zapret2_stop();
-    sleep(1);
-    $started = zapret2_start();
+    $runnerLock = fopen('/var/run/zapret2-test.lock', 'c');
+    if (!$runnerLock || !flock($runnerLock, LOCK_EX | LOCK_NB)) {
+        throw new RuntimeException('Another profile test is already running');
+    }
+    $cfg = zapret2_get_config();
+    $wasRunning = zapret2_is_running();
+    $restoreCfg = $wasRunning ? (zapret2_active_config() ?: $cfg) : $cfg;
+    if (zapret2_backend($cfg) === 'pf' || ($wasRunning && zapret2_backend($restoreCfg) === 'pf')) {
+        throw new RuntimeException('PF divert must be tested from a LAN client, not from the router.');
+    }
 
-    if (!$started) {
-        $state['results'][$profile] = ['started' => false];
+    foreach ($profiles as $profile) {
+        // Check if cancelled between profiles
+        $fresh = task_read($taskFile);
+        if (($fresh['status'] ?? '') === 'cancelled') {
+            break;
+        }
+
+        $state['current']    = $profile;
         $state['updated_at'] = time();
         task_write($taskFile, $state);
-        continue;
+
+        global $config;
+        $testCfg            = $cfg;
+        $testCfg['profile'] = $profile;
+        $config['installedpackages']['zapret2']['config'][0] = $testCfg;
+
+        $serviceChanged = true;
+        if (!zapret2_stop()) {
+            throw new RuntimeException('Could not stop the service before testing');
+        }
+        sleep(1);
+        $started = zapret2_start();
+
+        if (!$started) {
+            $state['results'][$profile] = ['started' => false];
+            $state['updated_at'] = time();
+            task_write($taskFile, $state);
+            continue;
+        }
+
+        sleep(2);
+
+        if ($mode === 'http') {
+            $result = zapret2_run_http_test_incremental($taskFile, $state, $profile);
+        } else {
+            $result = zapret2_run_dpi_test_incremental($taskFile, $state, $profile);
+        }
+
+        $wasCancelled = !empty($result['cancelled']);
+        unset($result['cancelled']);
+
+        $state['results'][$profile] = array_merge(['started' => true], $result);
+        $state['updated_at'] = time();
+        task_write($taskFile, $state);
+
+        if ($wasCancelled) {
+            break;
+        }
     }
 
-    sleep(2);
 
-    if ($mode === 'http') {
-        $result = zapret2_run_http_test_incremental($taskFile, $state, $profile);
-    } else {
-        $result = zapret2_run_dpi_test_incremental($taskFile, $state, $profile);
-    }
-
-    $state['results'][$profile] = array_merge(['started' => true], $result);
-    $state['updated_at'] = time();
-    task_write($taskFile, $state);
+    $state['status'] = (task_read($taskFile)['status'] ?? '') === 'cancelled' ? 'cancelled' : 'done';
+    $finished = true;
+} catch (Throwable $e) {
+    $state['error'] = $e->getMessage();
+    error_log('Zapret2 profile test: ' . $e->getMessage());
 }
-
-// Restore original service state
-$config['installedpackages']['zapret2']['config'][0] = $cfg;
-zapret2_stop();
-sleep(1);
-if (($cfg['enabled'] ?? '') === 'on') {
-    zapret2_start();
-}
-
-$fresh = task_read($taskFile);
-$state['status']     = ($fresh['status'] ?? '') === 'cancelled' ? 'cancelled' : 'done';
-$state['current']    = null;
-$state['updated_at'] = time();
-task_write($taskFile, $state);
 
 // ---------------------------------------------------------------------------
 // Incremental test runners — write partial results after each target
@@ -120,6 +180,10 @@ function zapret2_run_http_test_incremental(string $taskFile, array &$state, stri
     $targets     = [];
 
     foreach ($httpTargets as $name => $url) {
+        if ((task_read($taskFile)['status'] ?? '') === 'cancelled') {
+            return ['http' => $targets, 'cancelled' => true];
+        }
+
         $row = [
             'url'   => $url,
             'http'  => zapret2_curl_check($url, ''),
@@ -135,6 +199,10 @@ function zapret2_run_http_test_incremental(string $taskFile, array &$state, stri
     }
 
     foreach ($pingTargets as $name => $ip) {
+        if ((task_read($taskFile)['status'] ?? '') === 'cancelled') {
+            return ['http' => $targets, 'cancelled' => true];
+        }
+
         $targets[$name] = ['url' => $ip, 'ping' => zapret2_ping_check($ip)];
 
         $state['results'][$profile] = ['started' => true, 'http' => $targets];
@@ -147,7 +215,7 @@ function zapret2_run_http_test_incremental(string $taskFile, array &$state, stri
 
 function zapret2_run_dpi_test_incremental(string $taskFile, array &$state, string $profile): array
 {
-    $suiteJson = @file_get_contents(ZAPRET2_DPI_SUITE_URL);
+    $suiteJson = @file_get_contents(ZAPRET2_DPI_SUITE_URL, false, stream_context_create(['http' => ['timeout' => 10]]));
     if ($suiteJson === false) {
         return ['dpi' => ['error' => 'Failed to fetch DPI suite']];
     }
@@ -164,6 +232,11 @@ function zapret2_run_dpi_test_incremental(string $taskFile, array &$state, strin
     $timeout = 5;
 
     foreach (array_slice($suite, 0, 20) as $target) {
+        if ((task_read($taskFile)['status'] ?? '') === 'cancelled') {
+            @unlink($payloadFile);
+            return ['dpi' => $targets, 'cancelled' => true];
+        }
+
         $host = $target['host'] ?? '';
         if ($host === '') {
             continue;
