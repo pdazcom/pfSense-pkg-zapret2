@@ -154,3 +154,13 @@ Profiles are defined in `zapret2_get_profile_args()` inside `zapret2.inc`. Each 
 1. Update `ZAPRET2_VERSION` in `Makefile` and `install.sh` if upgrading upstream
 2. Tag: `git tag v1.x.x`
 3. Push tag — no build step needed (pure PHP/shell package)
+
+## PF backend and regression checks
+
+The package XML declares `filter_rules_needed`; installation/update registers the corresponding `filter_rule_function` in `installedpackages/package`. `zapret2_generate_rules("pfearly")` returns scoped PF anchors only while the listener is running. The active settings live in `/var/run/zapret2-active.json`, so saving unapplied settings does not silently change running rules during a firewall reload.
+
+PF start launches the listener before enabling rules. Stop removes interception and labelled states before terminating the listener. PF mode loads `ipdivert`, without loading IPFW or changing pfil ordering. Rule regeneration uses the same includes as `/etc/rc.filter_configure_sync`.
+
+Run `make check` for syntax and PF scope/validation checks. On a pfSense test VM also verify start/restart/stop, ordinary filter reload, reboot, destination alias updates, failed daemon startup, and LAN TCP/QUIC traffic. Retest legacy IPFW on its supported release before declaring the version matrix fully verified.
+
+The installer must deploy `zapret2_test_runner.php`. Test progress is written atomically, cancellation uses a separate flag, and a process lock prevents concurrent runners. Startup failure, stale progress, and bootstrap errors are visible to the GUI. Cleanup restores the previous running/stopped state. PF mode rejects router-local profile tests because they do not traverse the selected LAN interfaces.

@@ -114,6 +114,20 @@ make update HOST=root@192.168.1.1
 
 ---
 
+## PF divert on pfSense CE 2.8.x
+
+1. Ensure the pfSense firewall is enabled. PF mode will not enable a disabled firewall automatically. Confirm a LAN client can access the Internet through pfSense with Zapret2 stopped. Check its gateway and pfSense outbound NAT first.
+2. Open **Services → Zapret2**, enable the service, and choose **PF divert** under Traffic Filtering.
+3. Select the intended LAN/OPT interfaces and enable **PF Traffic Allowance**. The generated rules explicitly allow matching traffic before normal firewall restrictions and policy routing. WAN is excluded; router addresses are excluded even when using a destination alias.
+4. Choose a profile or enter Custom arguments. Enable YouTube QUIC / Discord UDP when the strategy needs those packets; putting `--filter-udp` in Custom arguments alone does not enable UDP interception.
+5. Apply, reconnect client sessions, and test from the LAN client. Only IPv4 clients in the selected interface subnets are covered. Routed downstream subnets and IPv6 are outside this PF mode's scope.
+
+The package registers `zapret2_generate_rules` with pfSense's package filter hook. Reboot and firewall Apply regenerate the rules; no edits to `/etc/inc/filter.inc` or `/tmp/rules.debug` are needed. Stop removes the rules and clears states labelled `zapret2` before stopping the listener.
+
+Health Check verifies the selected backend, listener and rules. It does not prove DPI bypass. The Profile Tester runs locally on the router, so PF mode directs you to test from a LAN client instead.
+
+To switch back to IPFW, select **IPFW (legacy)** and Apply. Existing configurations retain IPFW until explicitly changed.
+
 ## C. Post-install: pfSense network configuration
 
 ### How dvtws2 intercepts traffic

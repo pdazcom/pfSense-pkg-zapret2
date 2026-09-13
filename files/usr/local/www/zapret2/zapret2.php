@@ -92,6 +92,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if (empty($input_errors)) {
             $new_cfg = [
+                'firewall_backend'     => ($_POST['firewall_backend'] ?? 'ipfw') === 'pf' ? 'pf' : 'ipfw',
+                'pf_interfaces'        => implode(',', array_intersect(array_keys(zapret2_pf_interfaces()), (array) ($_POST['pf_interfaces'] ?? []))),
+                'pf_allow'             => !empty($_POST['pf_allow']) ? 'on' : '',
                 'enabled'              => !empty($_POST['enabled']) ? 'on' : '',
                 'profile'              => $profile,
                 'divert_port'          => $divert_port,
@@ -104,20 +107,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'youtube_quic_enabled' => $youtube_quic_enabled,
             ];
 
-            zapret2_save_config($new_cfg);
-            $pconfig      = $new_cfg;
-            $save_success = true;
+            if (zapret2_backend($new_cfg) === 'pf') {
+                try {
+                    zapret2_pf_rules($new_cfg);
+                } catch (Throwable $e) {
+                    $input_errors[] = $e->getMessage();
+                }
+            }
+            if (empty($input_errors)) {
+                zapret2_save_config($new_cfg);
+                $pconfig      = $new_cfg;
+                $save_success = true;
 
-            if ($act === 'apply') {
-                zapret2_resync();
+                if ($act === 'apply') {
+                    if (!zapret2_resync()) {
+                        $input_errors[] = gettext('Could not apply Zapret2 configuration. Check the service log below.');
+                    }
+                }
             }
         }
     } elseif ($act === 'start') {
-        zapret2_start();
+        if (!zapret2_start()) {
+            $input_errors[] = gettext('Zapret2 start failed. Check the service log below.');
+        }
     } elseif ($act === 'stop') {
-        zapret2_stop();
+        if (!zapret2_stop()) {
+            $input_errors[] = gettext('Zapret2 stop failed. Check the service log below.');
+        }
     } elseif ($act === 'restart') {
-        zapret2_restart();
+        if (!zapret2_restart()) {
+            $input_errors[] = gettext('Zapret2 restart failed. Check the service log below.');
+        }
     } elseif ($act === 'healthcheck_ajax') {
         // Called via AJAX — run health check synchronously and return output as JSON
         header('Content-Type: application/json');
@@ -132,6 +152,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($act === 'start_test_ajax') {
         header('Content-Type: application/json');
 
+        if (zapret2_backend() === 'pf' || (zapret2_is_running() && zapret2_backend(zapret2_active_config()) === 'pf')) {
+            echo json_encode(['error' => 'PF divert handles LAN traffic. Test from a LAN client; router profile tests cannot measure this path.']);
+            exit;
+        }
         $validProfiles  = array_keys($available_profiles);
         $rawProfiles    = (array) ($_POST['profiles'] ?? []);
         $profilesToTest = array_values(array_filter(
@@ -152,16 +176,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $runner   = __DIR__ . '/zapret2_test_runner.php';
         $phpBin   = '/usr/local/bin/php';
-        $cmd      = $phpBin . ' ' . escapeshellarg($runner)
+        if (!is_readable($runner) || !is_executable($phpBin)) {
+            echo json_encode(['error' => 'Profile runner is missing. Reinstall or update the package.']);
+            exit;
+        }
+        $cmd      = '/usr/bin/nohup ' . $phpBin . ' ' . escapeshellarg($runner)
                   . ' ' . escapeshellarg($taskId)
                   . ' ' . escapeshellarg($testMode)
                   . ' ' . escapeshellarg(json_encode($profilesToTest))
-                  . ' > /dev/null 2>&1 &';
+                  . ' >> /var/log/zapret2-test.log 2>&1 < /dev/null &';
 
         // Write initial state so poll sees the task immediately
         file_put_contents($taskFile, json_encode([
             'task_id'    => $taskId,
-            'status'     => 'running',
+            'status'     => 'starting',
             'mode'       => $testMode,
             'profiles'   => $profilesToTest,
             'current'    => null,
@@ -188,10 +216,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $state = json_decode(file_get_contents($taskFile), true) ?? [];
-        if (($state['status'] ?? '') === 'running') {
-            $state['status']     = 'cancelled';
-            $state['updated_at'] = time();
-            file_put_contents($taskFile, json_encode($state));
+        if (in_array($state['status'] ?? '', ['starting', 'running'], true)) {
+            // A separate flag cannot be overwritten by an in-flight progress write.
+            file_put_contents($taskFile . '.cancel', '1', LOCK_EX);
+            chmod($taskFile . '.cancel', 0600);
         }
 
         echo json_encode(['ok' => true]);
@@ -209,6 +237,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $state = json_decode(file_get_contents($taskFile), true) ?? [];
+
+        $age = time() - ($state['updated_at'] ?? time());
+        if ((($state['status'] ?? '') === 'starting' && $age > 15)
+            || (($state['status'] ?? '') === 'running'
+                && ((int) ($state['pid'] ?? 0) <= 0 || !posix_kill((int) $state['pid'], 0) || $age > 120))) {
+            $state['status'] = 'error';
+            $state['error'] = 'Profile runner stopped or stopped reporting progress. Check /var/log/zapret2-test.log.';
+        }
 
         // Clean up finished tasks older than 30 min
         if (($state['status'] ?? '') === 'done'
@@ -371,12 +407,14 @@ function z2Poll(taskId, mode) {
         .then(function(data) {
             if (data.error) {
                 z2StopPolling();
+                localStorage.removeItem(z2PollTaskFile);
                 document.getElementById('test-profiles-output').innerHTML =
-                    '<div class="alert alert-danger">' + data.error + '</div>';
+                    '<div class="alert alert-danger"></div>';
+                document.getElementById('test-profiles-output').firstChild.textContent = data.error;
                 return;
             }
             z2RenderProgress(data);
-            if (data.status === 'done' || data.status === 'cancelled') {
+            if (data.status === 'done' || data.status === 'cancelled' || data.status === 'error') {
                 z2StopPolling();
                 localStorage.removeItem(z2PollTaskFile);
             }
@@ -677,6 +715,22 @@ $form->add($section);
 $section = new Form_Section(gettext('Traffic Filtering'));
 
 $section->addInput(new Form_Select(
+    'firewall_backend', gettext('Firewall Backend'),
+    $pconfig['firewall_backend'] ?? 'ipfw',
+    ['ipfw' => 'IPFW (legacy)', 'pf' => 'PF divert (pfSense 2.8.x, IPv4 LAN traffic)']
+));
+$section->addInput(new Form_Select(
+    'pf_interfaces', gettext('PF LAN/OPT Interfaces'),
+    explode(',', $pconfig['pf_interfaces'] ?? ''), zapret2_pf_interfaces(), true
+))->setHelp(gettext('PF processes IPv4 clients on the selected interface subnets. WAN and router addresses are excluded.'));
+$section->addInput(new Form_Checkbox(
+    'pf_allow', gettext('PF Traffic Allowance'),
+    gettext('Allow selected traffic before the normal firewall rules'),
+    ($pconfig['pf_allow'] ?? '') === 'on'
+))->setHelp(gettext('Required for PF: early pass rules permit TCP 80/443 and enabled UDP ports from the selected LAN/OPT subnets. They take priority over normal firewall restrictions and policy routing for this traffic. Choose PF only on interfaces where this allowance is intended. Existing connections may need to be reconnected after enabling.'));
+
+
+$section->addInput(new Form_Select(
     'alias_name',
     gettext('Restrict to Alias (Include Mode)'),
     $pconfig['alias_name'] ?? '',
@@ -706,7 +760,7 @@ $section->addInput(new Form_Checkbox(
     gettext('Enable UDP divert for Discord voice and video'),
     ($pconfig['discord_udp_enabled'] ?? '') === 'on'
 ))->setHelp(gettext(
-    'Adds IPFW rules to divert Discord voice/video UDP traffic (port 443 QUIC and ' .
+    'Adds firewall rules to divert Discord voice/video UDP traffic (port 443 QUIC and ' .
     'ports 50000–65535) through dvtws2. Requires Discord DPI Bypass (TCP) to be enabled.'
 ))->setAttribute('id', 'discord_udp_enabled');
 
@@ -727,7 +781,7 @@ $section->addInput(new Form_Checkbox(
     gettext('Enable UDP divert for YouTube QUIC traffic'),
     ($pconfig['youtube_quic_enabled'] ?? '') === 'on'
 ))->setHelp(gettext(
-    'Adds an IPFW rule to divert outbound UDP port 443 (QUIC / HTTP3) through dvtws2. ' .
+    'Adds a firewall rule to divert UDP port 443 (QUIC / HTTP3) through dvtws2. ' .
     'Required to bypass YouTube when the browser uses HTTP/3 instead of TCP. ' .
     'Requires YouTube DPI Bypass (TCP) to be enabled.'
 ))->setAttribute('id', 'youtube_quic_enabled');
@@ -744,9 +798,7 @@ $section->addInput(new Form_Input(
     'number',
     $current_divert_port
 ))->setHelp(gettext(
-    'IPFW divert socket port number used by dvtws2. Default: 990. ' .
-    'Must match the port in the IPFW divert rule: ' .
-    'ipfw add 100 divert PORT tcp from any to any 80,443 out not diverted not sockarg. ' .
+    'Divert socket port used by dvtws2 and the selected firewall backend. Default: 990. ' .
     'Valid range: 1–65535.'
 ))->setAttribute('min', '1')
   ->setAttribute('max', '65535');

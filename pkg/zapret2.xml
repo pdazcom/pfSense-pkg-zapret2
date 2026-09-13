@@ -13,7 +13,7 @@
   </copyright>
 
   <name>zapret2</name>
-  <version>1.0.0</version>
+  <version>1.1.0</version>
   <title>Zapret2 DPI Bypass</title>
   <category>Services</category>
   <license>BSD 2-Clause</license>
@@ -23,7 +23,7 @@
     deep packet inspection on FreeBSD/pfSense. Provides profile-based configuration,
     service management, and a health check utility.
 
-    NOTE: This is an MVP/experimental release. The zapret2 backend (nfqws/tpws)
+    NOTE: This is an MVP/experimental release. The zapret2 backend (dvtws2)
     must be installed separately before using this package. See INSTALL.md.
   </description>
 
@@ -31,6 +31,7 @@
     Main PHP helper library.
     Loaded by GUI page, rc.d script, and install/resync hooks.
   -->
+  <filter_rules_needed>zapret2_generate_rules</filter_rules_needed>
   <include_file>/usr/local/pkg/zapret2/includes/zapret2.inc</include_file>
 
   <!--
@@ -50,7 +51,7 @@
   <service>
     <name>zapret2</name>
     <rcfile>zapret2</rcfile>
-    <executable>nfqws</executable>
+    <executable>dvtws2</executable>
     <description>Zapret2 DPI Bypass Service</description>
   </service>
 

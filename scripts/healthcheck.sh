@@ -78,11 +78,33 @@ else
     check "PID file /var/run/zapret2.pid exists" 1
 fi
 
+# ---- 3. Active firewall backend ----
+BACKEND=$(/usr/local/bin/php /usr/local/pkg/zapret2/includes/zapret2.inc status 2>/dev/null | sed -n 's/^backend: //p')
+log ""
+log "-- Firewall backend: ${BACKEND:-unknown} --"
+kldstat -m ipdivert >/dev/null 2>&1; check "ipdivert available" $?
+
+if [ "$BACKEND" = "pf" ]; then
+    pfctl -si 2>/dev/null | grep -q "^Status: Enabled"; check "PF firewall enabled" $?
+    PF_RULES=$(pfctl -a '*' -sr 2>/dev/null)
+    if printf '%s\n' "$PF_RULES" | grep -q 'label "zapret2"'; then
+        check "PF divert rules active" 0
+        printf '%s\n' "$PF_RULES" | grep 'label "zapret2"'
+        if [ -z "$dvtws2_pids" ]; then
+            check "PF divert rules have a running listener" 1
+        fi
+    elif [ -n "$dvtws2_pids" ]; then
+        check "PF divert rules active" 1
+    else
+        log "  [INFO] PF divert rules not active (service stopped)"
+    fi
+    log "  [INFO] PF handles IPv4 LAN traffic; verify connectivity from a LAN client."
+elif [ "$BACKEND" = "ipfw" ]; then
 # ---- 3. Kernel modules ----
 log ""
 log "-- Kernel modules --"
 kldstat -n ipfw     >/dev/null 2>&1; check "ipfw module loaded"    $?
-kldstat -n ipdivert >/dev/null 2>&1; check "ipdivert module loaded" $?
+
 
 # ---- 4. IPFW rules ----
 log ""
@@ -122,6 +144,10 @@ fi
 TABLE1=$(ipfw table 1 list 2>/dev/null | wc -l | tr -d ' ')
 if [ "${TABLE1}" -gt 0 ]; then
     log "  [INFO] IPFW table 1: ${TABLE1} entries (alias include mode active)"
+fi
+
+else
+    check "Known firewall backend" 1
 fi
 
 # ---- 5. Hostlists ----
