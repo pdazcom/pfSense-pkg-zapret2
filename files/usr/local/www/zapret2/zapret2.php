@@ -48,8 +48,12 @@ $available_profiles = [
     'fake_aggressive' => 'Fake Aggressive — fake TLS ×15 + multidisorder (stubborn DPI)',
     'syndata'         => 'SYN Data — alternative when fragmentation is blocked',
     'wssize_disorder' => 'WSize + Disorder — window size combo with multidisorder',
-    'tls_clone'       => 'TLS Clone — mirrors Client Hello to confuse stateful DPI',
-    'custom'          => 'Custom — specify arguments manually',
+    'tls_clone'            => 'TLS Clone — mirrors Client Hello to confuse stateful DPI',
+    'hostfakesplit'        => 'Host Fake Split — fake TLS + hostfakesplit (ALT9 style)',
+    'fake_multisplit_seqovl' => 'Fake + Multisplit seqovl=681 — fake TLS ×8 + seqovl split (ALT11/ALT12)',
+    'fake_ts'              => 'Fake TS — fake TLS with timestamp fooling instead of md5sig',
+    'fake_disorder_sni'    => 'Fake Disorder SNI — fake TLS rnd+dupsid+sni=google + multidisorder (FAKE TLS AUTO)',
+    'custom'               => 'Custom — specify arguments manually',
 ];
 
 // Handle POST actions

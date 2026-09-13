@@ -162,6 +162,34 @@ function zapret2_get_profile_args(string $profile, array $cfg = []): array
                 '--lua-desync=multisplit:pos=midsld',
             ];
 
+        case 'hostfakesplit':
+            // fake TLS with TCP MD5 fooling + hostfakesplit — ALT9-style; works where seqovl-based methods fail
+            return [
+                '--lua-desync=fake:blob=fake_default_tls:tcp_md5',
+                '--lua-desync=hostfakesplit',
+            ];
+
+        case 'fake_multisplit_seqovl':
+            // fake + multisplit with seqovl and TLS pattern — ALT11/ALT12 style
+            return [
+                '--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=8',
+                '--lua-desync=multisplit:pos=1:seqovl=681',
+            ];
+
+        case 'fake_ts':
+            // fake with timestamp fooling (ts) instead of md5sig — lighter on some DPI systems
+            return [
+                '--lua-desync=fake:blob=fake_default_tls:ts:repeats=6',
+                '--lua-desync=multisplit:pos=1',
+            ];
+
+        case 'fake_disorder_sni':
+            // fake TLS with rnd+dupsid+sni=www.google.com + multidisorder — ALT3/FAKE TLS AUTO style
+            return [
+                '--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=11:tls_mod=rnd,dupsid,sni=www.google.com',
+                '--lua-desync=multidisorder:pos=1,midsld',
+            ];
+
         case 'custom':
             // User-supplied raw arguments — used verbatim (validated for printable chars only)
             $raw = zapret2_sanitize_args($cfg['custom_args'] ?? '');
@@ -217,6 +245,7 @@ function zapret2_write_youtube_hostlist(): void
         'wide-youtube.l.google.com',
         'youtubekids.com',
         '*.youtubekids.com',
+        'youtube.googleapis.com',
         'youtubei.googleapis.com',
         'youtubeembeddedplayer.googleapis.com',
         'yt-video-upload.l.google.com',
@@ -313,19 +342,21 @@ function zapret2_build_command(): string
     $parts[] = '--lua-init=@' . escapeshellarg(ZAPRET2_LUA_DIR . '/zapret-lib.lua');
     $parts[] = '--lua-init=@' . escapeshellarg(ZAPRET2_LUA_DIR . '/zapret-antidpi.lua');
 
+    // For non-custom profiles: prepend hostlist args before desync args so they
+    // apply to the single implicit profile. For custom profile: the user manages
+    // hostlists inside their own args (with --new separators), so we skip them.
+    if ($profile !== 'custom') {
+        if (($cfg['discord_enabled'] ?? '') === 'on') {
+            $parts[] = '--hostlist=' . escapeshellarg(ZAPRET2_DISCORD_HOSTLIST);
+        }
+        if (($cfg['youtube_enabled'] ?? '') === 'on') {
+            $parts[] = '--hostlist=' . escapeshellarg(ZAPRET2_YOUTUBE_HOSTLIST);
+        }
+    }
+
     // Append profile Lua desync arguments
     foreach ($args as $arg) {
         $parts[] = $arg;
-    }
-
-    // Discord hostlist filter
-    if (($cfg['discord_enabled'] ?? '') === 'on') {
-        $parts[] = '--hostlist=' . escapeshellarg(ZAPRET2_DISCORD_HOSTLIST);
-    }
-
-    // YouTube hostlist filter
-    if (($cfg['youtube_enabled'] ?? '') === 'on') {
-        $parts[] = '--hostlist=' . escapeshellarg(ZAPRET2_YOUTUBE_HOSTLIST);
     }
 
     // Debug logging
@@ -384,32 +415,35 @@ function zapret2_add_ipfw_rule(): void
     mwexec('ipfw delete 101 2>/dev/null; true');
     mwexec('ipfw delete 102 2>/dev/null; true');
 
+    // Destination selector shared by TCP and UDP divert rules.
     // When any hostlist mode is on, use 'any' — dvtws2 filters by domain itself.
-    // When both are off, optionally restrict to alias table(1).
+    // When both are off, optionally restrict to alias table(1). Applying the same
+    // restriction to UDP prevents the QUIC fake from hitting unrelated UDP 443
+    // traffic such as DNS-over-QUIC, which otherwise breaks name resolution.
     if ($discordOn || $youtubeOn) {
-        $tcpDst = 'any';
+        $dst = 'any';
     } elseif ($aliasName !== '' && zapret2_resolve_alias_to_table()) {
-        $tcpDst = "'table(1)'";
+        $dst = "'table(1)'";
     } else {
-        $tcpDst = 'any';
+        $dst = 'any';
         if ($aliasName !== '') {
             mwexec('ipfw table 1 flush 2>/dev/null; true');
         }
     }
 
     mwexec('ipfw add 100 divert ' . $divertPort .
-        ' tcp from any to ' . $tcpDst . ' 80,443 out not diverted not sockarg');
+        ' tcp from any to ' . $dst . ' 80,443 out not diverted not sockarg');
 
     // UDP 443 (QUIC): add when Discord UDP or YouTube QUIC is enabled
     if ($discordUdpOn || $youtubeQuicOn) {
         mwexec('ipfw add 101 divert ' . $divertPort .
-            ' udp from any to any 443 out not diverted not sockarg');
+            ' udp from any to ' . $dst . ' 443 out not diverted not sockarg');
     }
 
     // Discord voice/video UDP ports (only when Discord UDP is on)
     if ($discordUdpOn) {
         mwexec('ipfw add 102 divert ' . $divertPort .
-            ' udp from any to any 50000-65535 out not diverted not sockarg');
+            ' udp from any to ' . $dst . ' 50000-65535 out not diverted not sockarg');
     }
 }
 

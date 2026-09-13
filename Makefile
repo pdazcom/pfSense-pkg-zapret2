@@ -9,6 +9,10 @@ ZAPRET2_VERSION ?= v0.9.5.2
 ZAPRET2_TARBALL = /tmp/zapret2-$(ZAPRET2_VERSION).tar.gz
 ZAPRET2_URL = https://github.com/bol-van/zapret2/releases/download/$(ZAPRET2_VERSION)/zapret2-$(ZAPRET2_VERSION).tar.gz
 
+# Local path to ipset file from zapret-discord-youtube (updated on Windows/local machine)
+IPSET_LOCAL ?= $(HOME)/Downloads/zapret-discord-youtube/.service/ipset-service.txt
+IPSET_REMOTE = /usr/local/etc/zapret2/ipset-all.txt
+
 # Download zapret2 tarball locally if not already cached
 $(ZAPRET2_TARBALL):
 	@echo "Downloading zapret2 $(ZAPRET2_VERSION)..."
