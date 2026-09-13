@@ -511,6 +511,7 @@ function zapret2_register_pf_hook(): void
         if (($package['name'] ?? '') === 'zapret2') {
             $package['version'] = '1.1.0';
             $package['configurationfile'] = 'zapret2.xml';
+            $package['include_file'] = '/usr/local/pkg/zapret2/includes/zapret2.inc';
             $package['filter_rule_function'] = 'zapret2_generate_rules';
             $config['installedpackages']['package'] = $packages;
             write_config('Zapret2: register PF filter hook');
@@ -518,8 +519,13 @@ function zapret2_register_pf_hook(): void
         }
     }
     unset($package);
-    $packages[] = ['name' => 'zapret2', 'version' => '1.1.0',
-        'configurationfile' => 'zapret2.xml', 'filter_rule_function' => 'zapret2_generate_rules'];
+    $packages[] = [
+        'name'                => 'zapret2',
+        'version'             => '1.1.0',
+        'configurationfile'   => 'zapret2.xml',
+        'include_file'        => '/usr/local/pkg/zapret2/includes/zapret2.inc',
+        'filter_rule_function' => 'zapret2_generate_rules',
+    ];
     $config['installedpackages']['package'] = $packages;
     write_config('Zapret2: register PF filter hook');
 }
@@ -699,7 +705,8 @@ function zapret2_start(): bool
 function zapret2_stop(): bool
 {
     $active = zapret2_active_config();
-    $backend = zapret2_backend($active ?: zapret2_get_config());
+    $backend = zapret2_backend($active);
+    $ipfwActive = zapret2_ipfw_rules_active();
     @unlink(ZAPRET2_ACTIVE_FILE);
     if ($backend === 'pf') {
         if (!zapret2_reload_pf()) {
@@ -709,7 +716,10 @@ function zapret2_stop(): bool
             return false;
         }
         mwexec('/sbin/pfctl -k label -k zapret2 2>/dev/null');
-    } elseif (mwexec('kldstat -q -m ipfw') === 0) {
+    }
+    // An upgrade from a legacy IPFW installation may predate the active-state
+    // file. Always remove package-owned divert rules before stopping the daemon.
+    if ($ipfwActive && mwexec('kldstat -q -m ipfw') === 0) {
         zapret2_remove_ipfw_rule();
         zapret2_reset_ipfw_sysctls();
     }
@@ -740,6 +750,12 @@ function zapret2_stop(): bool
 
     zapret2_log('stopped');
     return true;
+}
+
+function zapret2_ipfw_rules_active(): bool
+{
+    $rules = shell_exec('/sbin/ipfw list 2>/dev/null') ?? '';
+    return preg_match('/^0*10[012]\s+divert\s+/m', $rules) === 1;
 }
 
 function zapret2_restart(): bool
